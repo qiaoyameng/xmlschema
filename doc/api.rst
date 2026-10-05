@@ -49,6 +49,10 @@ Document level API
 .. autofunction:: xmlschema.to_json
 .. autofunction:: xmlschema.to_etree
 .. autofunction:: xmlschema.from_json
+.. autofunction:: xmlschema.normalize_values
+
+.. autoclass:: xmlschema.NormalizedDocument
+.. autoclass:: xmlschema.ValueRewrite
 
 
 .. _schema-level-api:
@@ -112,6 +116,7 @@ Schema level API
     .. automethod:: validate
     .. automethod:: is_valid
     .. automethod:: iter_errors
+    .. automethod:: normalize_values
 
     .. automethod:: decode
     .. automethod:: iter_decode

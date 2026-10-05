@@ -1211,6 +1211,17 @@ class XMLSchemaBase(XsdValidator, ElementPathMixin[Union[SchemaType, XsdElement]
 
         return f'{{{namespace}}}{local_name}'
 
+    def normalize_values(self, source: Union[XMLSourceType, XMLResource],
+                         namespaces: Optional[NsmapType] = None):
+        """
+        Return a lexical-normalized copy of *source* and its applied value rewrites.
+
+        This performs XSD simple-value lexical normalization only. It is not XML
+        C14N and does not claim to preserve validity of existing digital signatures.
+        """
+        from xmlschema.normalization import normalize_values
+        return normalize_values(source, schema=self, namespaces=namespaces)
+
     def validate(self, source: Union[XMLSourceType, XMLResource],
                  path: Optional[str] = None,
                  schema_path: Optional[str] = None,
