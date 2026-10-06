@@ -1,0 +1,31 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<order orderNo="O-1001" channel="app">
+  <customer>Acme Co</customer>
+  <note></note>
+  <currency>USD</currency>
+  <gift>true</gift>
+  <coupon xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+          xsi:nil="true"/>
+  <shipping mode="air" insured="true">door to door</shipping>
+  <invoiceNo>INV-2026-0001</invoiceNo>
+  <item id="i1">
+    <sku>A-001</sku>
+    <quantity>2</quantity>
+    <unitPrice>19.99</unitPrice>
+    <discount>1.50</discount>
+    <remark>first run</remark>
+  </item>
+  <item id="i2">
+    <sku>B-017</sku>
+    <quantity>1</quantity>
+    <unitPrice>240.00</unitPrice>
+  </item>
+  <item id="i3">
+    <sku>C-042</sku>
+    <quantity>5</quantity>
+    <unitPrice>3.5</unitPrice>
+    <discount>0</discount>
+    <remark xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+            xsi:nil="true"/>
+  </item>
+</order>

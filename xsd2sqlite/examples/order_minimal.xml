@@ -1,0 +1,12 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<order orderNo="O-1002">
+  <customer>Globex</customer>
+  <shipping mode="sea">port pickup</shipping>
+  <collectOnDelivery>42.00</collectOnDelivery>
+  <item id="i9">
+    <sku>Z-999</sku>
+    <quantity>10</quantity>
+    <unitPrice>0.99</unitPrice>
+  </item>
+  <internal/>
+</order>

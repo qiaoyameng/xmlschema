@@ -1,0 +1,60 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<xs:schema xmlns:xs="http://www.w3.org/2001/XMLSchema">
+
+  <xs:element name="order">
+    <xs:complexType>
+      <xs:sequence>
+        <xs:element name="customer" type="xs:string"/>
+        <xs:element name="note" type="xs:string" minOccurs="0"/>
+        <xs:element name="currency" default="CNY" minOccurs="0">
+          <xs:simpleType>
+            <xs:restriction base="xs:string">
+              <xs:enumeration value="CNY"/>
+              <xs:enumeration value="USD"/>
+              <xs:enumeration value="EUR"/>
+            </xs:restriction>
+          </xs:simpleType>
+        </xs:element>
+        <xs:element name="gift" type="xs:boolean" minOccurs="0"/>
+        <xs:element name="coupon" type="xs:string" nillable="true"
+                    minOccurs="0"/>
+        <xs:element name="shipping">
+          <xs:complexType>
+            <xs:simpleContent>
+              <xs:extension base="xs:string">
+                <xs:attribute name="mode" use="required"/>
+                <xs:attribute name="insured" type="xs:boolean"
+                              default="false"/>
+                <xs:attribute name="fixed-tag" fixed="EXPRESS"/>
+              </xs:extension>
+            </xs:simpleContent>
+          </xs:complexType>
+        </xs:element>
+        <xs:choice>
+          <xs:element name="invoiceNo" type="xs:string"/>
+          <xs:element name="collectOnDelivery" type="xs:decimal"/>
+        </xs:choice>
+        <xs:element name="item" maxOccurs="unbounded">
+          <xs:complexType>
+            <xs:sequence>
+              <xs:element name="sku" type="xs:string"/>
+              <xs:element name="quantity" type="xs:positiveInteger"/>
+              <xs:element name="unitPrice" type="xs:decimal"/>
+              <xs:element name="discount" type="xs:decimal" default="0"
+                          minOccurs="0"/>
+              <xs:element name="remark" type="xs:string" nillable="true"
+                          minOccurs="0"/>
+            </xs:sequence>
+            <xs:attribute name="id" type="xs:ID" use="required"/>
+          </xs:complexType>
+        </xs:element>
+        <xs:element name="internal" minOccurs="0">
+          <xs:complexType/>
+        </xs:element>
+      </xs:sequence>
+      <xs:attribute name="orderNo" type="xs:string" use="required"/>
+      <xs:attribute name="channel" default="web"/>
+    </xs:complexType>
+  </xs:element>
+
+</xs:schema>
