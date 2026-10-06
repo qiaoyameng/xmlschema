@@ -11,15 +11,22 @@
 This module contains classes for other XML Schema identity constraints.
 """
 import copy
+import datetime
+import os
+import pickle
 import re
 import math
+import sqlite3
+import tempfile
 from collections import Counter
 from collections.abc import Iterator
+from decimal import Decimal
 from typing import TYPE_CHECKING, cast, Any, Optional, Union
 
 from elementpath import ElementPathError, XPathContext, \
     ElementNode, translate_pattern, AttributeNode
-from elementpath.datatypes import UntypedAtomic
+from elementpath.datatypes import UntypedAtomic, QName, Duration, \
+    AbstractDateTime, AbstractBinary
 from elementpath.xpath_nodes import EtreeElementNode
 
 import xmlschema.names as nm
@@ -42,6 +49,7 @@ if TYPE_CHECKING:
 
 IdentityFieldItemType = Union[AtomicValueType, XsdAttribute, tuple[Any, ...], None]
 IdentityCounterType = tuple[IdentityFieldItemType, ...]
+IdentitySourceType = Optional[tuple[Optional[str], Optional[int]]]
 
 
 # XSD identities use a restricted XPath 2.0 parser. The XMLSchemaProxy is
@@ -52,6 +60,66 @@ IdentityMapType = dict[Union['XsdKey', 'XsdKeyref', str, None],
                        Union['IdentityCounter', 'KeyrefCounter']]
 IdentityNodeType = Union[ElementNode, AttributeNode]
 FieldDecoderType = Union[SchemaElementType, SchemaAttributeType]
+
+
+def _encoded_part(tag: bytes, value: bytes = b'') -> bytes:
+    return tag + str(len(value)).encode('ascii') + b':' + value
+
+
+def encode_identity_value(value: IdentityFieldItemType) -> bytes:
+    """Encode an identity value preserving the equality semantics used in memory."""
+    if value is None:
+        return b'N'
+    elif isinstance(value, bool):
+        return b'b' + (b'1' if value else b'0')
+    elif isinstance(value, tuple):
+        parts = [b'L' + str(len(value)).encode('ascii') + b':']
+        parts.extend(encode_identity_value(item) for item in value)
+        return b''.join(parts)
+    elif isinstance(value, str):
+        return _encoded_part(b's', value.encode('utf-8'))
+    elif isinstance(value, bytes):
+        return _encoded_part(b'x', value)
+    elif isinstance(value, (Decimal, int)):
+        canonical = format(Decimal(value).normalize(), 'f')
+        return _encoded_part(b'n', canonical.encode('ascii'))
+    elif isinstance(value, float):
+        if math.isnan(value):
+            return b'Fnan'
+        return _encoded_part(b'f', repr(value).encode('ascii'))
+    elif isinstance(value, QName):
+        uri = value.uri.encode('utf-8')
+        local_name = value.local_name.encode('utf-8')
+        return _encoded_part(b'q', uri + b'|' + local_name)
+    elif isinstance(value, Duration):
+        seconds = format(value.seconds, 'f')
+        serialized = f'{value.__class__.__name__}|{value.months}|{seconds}'
+        return _encoded_part(b'D', serialized.encode('utf-8'))
+    elif isinstance(value, AbstractDateTime):
+        if value.tzinfo is None:
+            serialized = f'{value.__class__.__name__}|{value._year}|' \
+                         f'{value._dt.replace(tzinfo=None).isoformat()}'
+        else:
+            dt = value._dt.astimezone(datetime.timezone.utc).replace(tzinfo=None)
+            serialized = f'{value.__class__.__name__}|{value._year}|{dt.isoformat()}'
+        return _encoded_part(b'T', serialized.encode('utf-8'))
+    elif isinstance(value, AbstractBinary):
+        return _encoded_part(b'B', value.decode())
+
+    try:
+        return _encoded_part(b'P', pickle.dumps(value, protocol=pickle.HIGHEST_PROTOCOL))
+    except (TypeError, pickle.PicklingError):
+        return _encoded_part(b'r', repr(value).encode('utf-8'))
+
+
+def encode_identity_key(fields: IdentityCounterType) -> bytes:
+    parts = [b'K' + str(len(fields)).encode('ascii') + b':']
+    parts.extend(encode_identity_value(field) for field in fields)
+    return b''.join(parts)
+
+
+def identity_fields_tuple(fields: Any) -> IdentityCounterType:
+    return fields if isinstance(fields, tuple) else (fields,)
 
 
 class XsdSelector(XsdComponent):
@@ -245,8 +313,10 @@ class XsdIdentity(XsdComponent):
                     self.elements[e] = [FieldValueSelector(f, e) for f in self.fields]
                     e.selected_by.add(self)
 
-    def get_counter(self, elem: ElementType) -> 'IdentityCounter':
-        return IdentityCounter(self, elem)
+    def get_counter(self, elem: ElementType,
+                    index: Optional['SQLiteIdentityIndex'] = None,
+                    index_threshold: Optional[int] = None) -> 'IdentityCounter':
+        return IdentityCounter(self, elem, index, index_threshold)
 
 
 class XsdUnique(XsdIdentity):
@@ -333,8 +403,10 @@ class XsdKeyref(XsdIdentity):
 
             self.refer_path = refer_path
 
-    def get_counter(self, elem: ElementType) -> 'KeyrefCounter':
-        return KeyrefCounter(self, elem)
+    def get_counter(self, elem: ElementType,
+                    index: Optional['SQLiteIdentityIndex'] = None,
+                    index_threshold: Optional[int] = None) -> 'KeyrefCounter':
+        return KeyrefCounter(self, elem, index, index_threshold)
 
 
 class Xsd11Unique(XsdUnique):
@@ -361,30 +433,372 @@ class Xsd11Keyref(XsdKeyref):
             super()._parse()
 
 
+class SQLiteIdentityIndex:
+    """A temporary SQLite storage for identity constraint counters."""
+
+    __slots__ = ('path', '_temporary_dir', '_connection', '_counter_ids')
+
+    def __init__(self) -> None:
+        self._temporary_dir = tempfile.TemporaryDirectory(prefix='xmlschema-identity-')
+        self.path = os.path.join(self._temporary_dir.name, 'identities.sqlite')
+        self._connection = sqlite3.connect(self.path)
+        self._counter_ids: dict[int, int] = {}
+
+        self._connection.execute('PRAGMA journal_mode=MEMORY')
+        self._connection.execute('PRAGMA synchronous=OFF')
+        self._connection.execute(
+            '''CREATE TABLE identity_values (
+                counter_id INTEGER NOT NULL,
+                tuple_key BLOB NOT NULL,
+                fields BLOB NOT NULL,
+                occurrences INTEGER NOT NULL,
+                source_url TEXT,
+                source_line INTEGER,
+                PRIMARY KEY (counter_id, tuple_key)
+            )'''
+        )
+
+    @property
+    def connection(self) -> sqlite3.Connection:
+        return self._connection
+
+    def counter_id(self, counter: 'IdentityCounter') -> int:
+        key = id(counter)
+        try:
+            return self._counter_ids[key]
+        except KeyError:
+            counter_id = len(self._counter_ids) + 1
+            self._counter_ids[key] = counter_id
+            return counter_id
+
+    def increase(self, counter: 'IdentityCounter', fields: IdentityCounterType,
+                 source: IdentitySourceType = None) -> int:
+        fields = identity_fields_tuple(fields)
+        tuple_key = encode_identity_key(fields)
+        payload = pickle.dumps(fields, protocol=pickle.HIGHEST_PROTOCOL)
+        counter_id = self.counter_id(counter)
+        source_url, source_line = source or (None, None)
+
+        cursor = self._connection.execute(
+            '''INSERT OR IGNORE INTO identity_values
+               (counter_id, tuple_key, fields, occurrences, source_url, source_line)
+               VALUES (?, ?, ?, 1, ?, ?)''',
+            (counter_id, sqlite3.Binary(tuple_key), sqlite3.Binary(payload),
+             source_url, source_line)
+        )
+        if cursor.rowcount:
+            return 1
+
+        self._connection.execute(
+            '''UPDATE identity_values SET occurrences = occurrences + 1
+               WHERE counter_id = ? AND tuple_key = ?''',
+            (counter_id, sqlite3.Binary(tuple_key))
+        )
+        row = self._connection.execute(
+            'SELECT occurrences FROM identity_values WHERE counter_id = ? AND tuple_key = ?',
+            (counter_id, sqlite3.Binary(tuple_key))
+        ).fetchone()
+        return int(row[0])
+
+    def migrate(self, counter: 'IdentityCounter',
+                values: Counter[IdentityCounterType],
+                exclude: Optional[IdentityCounterType] = None) -> None:
+        counter_id = self.counter_id(counter)
+        rows = []
+        for fields, occurrences in values.items():
+            fields = identity_fields_tuple(fields)
+            if exclude is not None and fields == identity_fields_tuple(exclude):
+                continue
+            rows.append((
+                counter_id,
+                sqlite3.Binary(encode_identity_key(fields)),
+                sqlite3.Binary(pickle.dumps(fields, protocol=pickle.HIGHEST_PROTOCOL)),
+                occurrences,
+                None,
+                None,
+            ))
+        self._connection.executemany(
+            '''INSERT OR IGNORE INTO identity_values
+               (counter_id, tuple_key, fields, occurrences, source_url, source_line)
+               VALUES (?, ?, ?, ?, ?, ?)''',
+            rows
+        )
+
+    def merge(self, target: 'IdentityCounter', source: 'IdentityCounter') -> int:
+        if source.on_disk:
+            source_id = self.counter_id(source)
+        else:
+            source_id = self.counter_id(source)
+            rows = []
+            for fields, occurrences in source._counter.items():
+                fields = identity_fields_tuple(fields)
+                rows.append((
+                    source_id,
+                    sqlite3.Binary(encode_identity_key(fields)),
+                    sqlite3.Binary(pickle.dumps(fields, protocol=pickle.HIGHEST_PROTOCOL)),
+                    occurrences,
+                    None,
+                    None,
+                ))
+            self._connection.executemany(
+                '''INSERT INTO identity_values
+                   (counter_id, tuple_key, fields, occurrences, source_url, source_line)
+                   VALUES (?, ?, ?, ?, ?, ?)''',
+                rows
+            )
+
+        if target.on_disk:
+            target_id = self.counter_id(target)
+        else:
+            target_id = self.counter_id(target)
+            rows = []
+            for fields, occurrences in target._counter.items():
+                fields = identity_fields_tuple(fields)
+                rows.append((
+                    target_id,
+                    sqlite3.Binary(encode_identity_key(fields)),
+                    sqlite3.Binary(pickle.dumps(fields, protocol=pickle.HIGHEST_PROTOCOL)),
+                    occurrences,
+                    None,
+                    None,
+                ))
+            self._connection.executemany(
+                '''INSERT INTO identity_values
+                   (counter_id, tuple_key, fields, occurrences, source_url, source_line)
+                   VALUES (?, ?, ?, ?, ?, ?)''',
+                rows
+            )
+
+        rows = self._connection.execute(
+            '''SELECT tuple_key, fields, occurrences, source_url, source_line
+               FROM identity_values WHERE counter_id = ?''',
+            (source_id,)
+        ).fetchall()
+        for tuple_key, fields, occurrences, source_url, source_line in rows:
+            self._connection.execute(
+                '''INSERT INTO identity_values
+                   (counter_id, tuple_key, fields, occurrences, source_url, source_line)
+                   VALUES (?, ?, ?, ?, ?, ?)
+                   ON CONFLICT(counter_id, tuple_key) DO UPDATE SET
+                       occurrences = identity_values.occurrences + excluded.occurrences''',
+                (target_id, tuple_key, fields, occurrences, source_url, source_line)
+            )
+        self._connection.execute(
+            'DELETE FROM identity_values WHERE counter_id = ?', (source_id,)
+        )
+        self._counter_ids.pop(id(source), None)
+        self._connection.commit()
+
+        return target_id
+
+    def clear(self, counter: 'IdentityCounter') -> None:
+        key = id(counter)
+        counter_id = self._counter_ids.pop(key, None)
+        if counter_id is not None:
+            self._connection.execute(
+                'DELETE FROM identity_values WHERE counter_id = ?', (counter_id,)
+            )
+
+    def items(self, counter: 'IdentityCounter') \
+            -> list[tuple[IdentityCounterType, int]]:
+        counter_id = self.counter_id(counter)
+        rows = self._connection.execute(
+            '''SELECT fields, occurrences FROM identity_values
+               WHERE counter_id = ? ORDER BY rowid''',
+            (counter_id,)
+        ).fetchall()
+        return [(pickle.loads(fields), int(occurrences))
+                for fields, occurrences in rows]
+
+    def missing(self, keyref: 'KeyrefCounter', key: 'IdentityCounter') \
+            -> Iterator[tuple[IdentityCounterType, int]]:
+        keyref_id = self.counter_id(keyref)
+        key_id = self.counter_id(key)
+        rows = self._connection.execute(
+            '''SELECT r.fields, r.occurrences FROM identity_values AS r
+               WHERE r.counter_id = ? AND NOT EXISTS (
+                   SELECT 1 FROM identity_values AS k
+                   WHERE k.counter_id = ? AND k.tuple_key = r.tuple_key
+               ) ORDER BY r.rowid''',
+            (keyref_id, key_id)
+        )
+        for fields, occurrences in rows:
+            yield pickle.loads(fields), int(occurrences)
+
+    def missing_values(self, keyref: 'KeyrefCounter',
+                       values: Counter[IdentityCounterType]) \
+            -> Iterator[tuple[IdentityCounterType, int]]:
+        keyref_id = self.counter_id(keyref)
+        key_id = 0
+        rows = []
+        for fields, occurrences in values.items():
+            fields = identity_fields_tuple(fields)
+            rows.append((
+                key_id,
+                sqlite3.Binary(encode_identity_key(fields)),
+                sqlite3.Binary(pickle.dumps(fields, protocol=pickle.HIGHEST_PROTOCOL)),
+                occurrences,
+                None,
+                None,
+            ))
+        self._connection.executemany(
+            '''INSERT INTO identity_values
+               (counter_id, tuple_key, fields, occurrences, source_url, source_line)
+               VALUES (?, ?, ?, ?, ?, ?)''',
+            rows
+        )
+        try:
+            result = self._connection.execute(
+                '''SELECT r.fields, r.occurrences FROM identity_values AS r
+                   WHERE r.counter_id = ? AND NOT EXISTS (
+                       SELECT 1 FROM identity_values AS k
+                       WHERE k.counter_id = ? AND k.tuple_key = r.tuple_key
+                   ) ORDER BY r.rowid''',
+                (keyref_id, key_id)
+            ).fetchall()
+        finally:
+            self._connection.execute(
+                'DELETE FROM identity_values WHERE counter_id = ?', (key_id,)
+            )
+            self._connection.commit()
+        for fields, occurrences in result:
+            yield pickle.loads(fields), int(occurrences)
+
+    def contains(self, counter: 'IdentityCounter', fields: IdentityCounterType) -> bool:
+        fields = identity_fields_tuple(fields)
+        counter_id = self.counter_id(counter)
+        for candidate in (fields, fields[0]) if len(fields) == 1 else (fields,):
+            candidate = identity_fields_tuple(candidate)
+            row = self._connection.execute(
+                '''SELECT 1 FROM identity_values WHERE counter_id = ? AND tuple_key = ?''',
+                (counter_id, sqlite3.Binary(encode_identity_key(candidate)))
+            ).fetchone()
+            if row is not None:
+                return True
+        return False
+
+    def close(self) -> None:
+        connection = self._connection
+        self._connection = None  # type: ignore[assignment]
+        if connection is not None:
+            connection.close()
+        temporary_dir = self._temporary_dir
+        self._temporary_dir = None  # type: ignore[assignment]
+        if temporary_dir is not None:
+            temporary_dir.cleanup()
+
+    def __enter__(self) -> 'SQLiteIdentityIndex':
+        return self
+
+    def __exit__(self, exc_type: Optional[type[BaseException]],
+                 exc_value: Optional[BaseException],
+                 traceback: Any) -> None:
+        self.close()
+
+    def __del__(self) -> None:
+        try:
+            self.close()
+        except Exception:
+            pass
+
+
 class IdentityCounter:
     elements: Optional[set[Any]]  # don't need to check, should be only etree elements anyway
 
-    __slots__ = ('elements', 'counter', 'identity', 'elem', 'enabled')
+    __slots__ = ('elements', '_counter', 'identity', 'elem', 'enabled',
+                 '_index', '_index_id', '_index_threshold')
 
-    def __init__(self, identity: XsdIdentity, elem: ElementType) -> None:
+    def __init__(self, identity: XsdIdentity, elem: ElementType,
+                 index: Optional[SQLiteIdentityIndex] = None,
+                 index_threshold: Optional[int] = None) -> None:
         self.counter: Counter[IdentityCounterType] = Counter[IdentityCounterType]()
         self.identity = identity
         self.elem = elem
         self.enabled = True
         self.elements = None
+        self._index = index
+        self._index_id: Optional[int] = None
+        self._index_threshold = index_threshold
+
+    @property
+    def counter(self) -> Counter[IdentityCounterType]:
+        if self._index is None or self._index_id is None:
+            return self._counter
+        return Counter(dict(self._index.items(self)))
+
+    @counter.setter
+    def counter(self, value: Counter[IdentityCounterType]) -> None:
+        self._counter = value
+
+    @property
+    def on_disk(self) -> bool:
+        return self._index is not None and self._index_id is not None
+
+    def _switch_to_disk(self, fields: IdentityCounterType) -> None:
+        assert self._index is not None
+        values = self._counter
+        self._index_id = self._index.counter_id(self)
+        self._index.migrate(self, values, exclude=fields)
+        self._counter.clear()
+
+    def merge(self, other: 'IdentityCounter') -> None:
+        if self.on_disk or other.on_disk:
+            index = self._index or other._index
+            assert index is not None
+            self._index = other._index = index
+            self._index_threshold = other._index_threshold
+            target_id = index.merge(self, other)
+            self._index_id = target_id
+            other._index_id = None
+            self._counter.clear()
+            other._counter.clear()
+        else:
+            self._counter.update(other._counter)
+
+    def _counter_or_items(self):
+        if self.on_disk:
+            assert self._index is not None
+            return self._index.items(self)
+        return self._counter.items()
 
     def __repr__(self) -> str:
         return "%s%r" % (self.__class__.__name__[:-7], self.counter)
 
     def reset(self, elem: ElementType) -> None:
-        self.counter.clear()
+        if self.on_disk:
+            assert self._index is not None
+            self._index.clear(self)
+            self._index_id = None
+            if self._index_threshold is None:
+                self._index = None
+        self._counter.clear()
         self.elem = elem
         self.enabled = True
         self.elements = None
 
-    def increase(self, fields: IdentityCounterType) -> None:
-        self.counter[fields] += 1
-        if self.counter[fields] == 2:
+    def _increment(self, fields: IdentityCounterType,
+                   source: IdentitySourceType) -> int:
+        fields = identity_fields_tuple(fields)
+
+        if self.on_disk:
+            assert self._index is not None
+            return self._index.increase(self, fields, source)
+
+        self._counter[fields] += 1
+        occurrences = self._counter[fields]
+        if self._index is None or self._index_threshold is None:
+            return occurrences
+
+        if len(self._counter) <= self._index_threshold:
+            return occurrences
+
+        self._switch_to_disk(fields)
+        return self._index.increase(self, fields, source)
+
+    def increase(self, fields: IdentityCounterType,
+                 source: IdentitySourceType = None) -> None:
+        occurrences = self._increment(fields, source)
+        if occurrences == 2:
             msg = _("duplicated value {0!r} for {1!r}")
             raise XMLSchemaValueError(msg.format(fields, self.identity))
 
@@ -392,30 +806,55 @@ class IdentityCounter:
 class KeyrefCounter(IdentityCounter):
     identity: XsdKeyref
 
-    def __init__(self, identity: XsdIdentity, elem: ElementType) -> None:
-        super().__init__(identity, elem)
+    def __init__(self, identity: XsdIdentity, elem: ElementType,
+                 index: Optional[SQLiteIdentityIndex] = None,
+                 index_threshold: Optional[int] = None) -> None:
+        super().__init__(identity, elem, index, index_threshold)
         if isinstance(self.identity.refer, (XsdKey, XsdUnique)):
             self.refer = self.identity.refer
 
-    def increase(self, fields: IdentityCounterType) -> None:
-        self.counter[fields] += 1
+    def increase(self, fields: IdentityCounterType,
+                 source: IdentitySourceType = None) -> None:
+        self._increment(fields, source)
 
     def iter_errors(self, identities: dict[XsdIdentity, IdentityCounter]) \
             -> Iterator[XMLSchemaValueError]:
         if self.refer is None:
             return  # don't validate with an unbuilt keyref
 
-        refer_values = identities[self.refer].counter
+        refer_counter = identities[self.refer]
 
-        for v in filter(lambda x: x not in refer_values, self.counter):
-            if len(v) == 1 and v[0] in refer_values:
-                continue
-            elif self.counter[v] > 1:
+        if self.on_disk and refer_counter.on_disk:
+            assert self._index is not None and self._index is refer_counter._index
+            missing = self._index.missing(self, refer_counter)
+        elif self.on_disk:
+            assert self._index is not None
+            missing = self._index.missing_values(self, refer_counter._counter)
+        elif refer_counter.on_disk:
+            assert refer_counter._index is not None
+            missing = (
+                (value, occurrences)
+                for value, occurrences in self._counter.items()
+                if not refer_counter._index.contains(refer_counter, value)
+                and not (len(value) == 1
+                         and refer_counter._index.contains(refer_counter, value[0]))
+            )
+        else:
+            refer_values = refer_counter._counter
+            missing = (
+                (value, occurrences)
+                for value, occurrences in self._counter_or_items()
+                if value not in refer_values
+                and not (len(value) == 1 and value[0] in refer_values)
+            )
+
+        for value, occurrences in missing:
+            if occurrences > 1:
                 msg = "value {} not found for {!r} ({} times)"
-                yield XMLSchemaValueError(msg.format(v, self.refer, self.counter[v]))
+                yield XMLSchemaValueError(msg.format(value, self.refer, occurrences))
             else:
                 msg = "value {} not found for {!r}"
-                yield XMLSchemaValueError(msg.format(v, self.identity.refer))
+                yield XMLSchemaValueError(msg.format(value, self.identity.refer))
 
 
 class FieldValueSelector:

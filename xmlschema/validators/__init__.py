@@ -20,7 +20,7 @@ from .particles import ParticleMixin
 from .assertions import XsdAssert
 from .notations import XsdNotation
 from .identities import XsdSelector, XsdFieldSelector, XsdIdentity, XsdKeyref, XsdKey, \
-    XsdUnique, Xsd11Keyref, Xsd11Key, Xsd11Unique
+    XsdUnique, Xsd11Keyref, Xsd11Key, Xsd11Unique, SQLiteIdentityIndex
 from .facets import XsdFacet, XsdWhiteSpaceFacet, XsdLengthFacet, XsdMinLengthFacet, \
     XsdMaxLengthFacet, XsdMinExclusiveFacet, XsdMinInclusiveFacet, XsdMaxExclusiveFacet, \
     XsdMaxInclusiveFacet, XsdFractionDigitsFacet, XsdTotalDigitsFacet, \
@@ -50,7 +50,8 @@ __all__ = [
     'XsdValidator', 'XsdComponent', 'XsdAnnotation', 'XsdType',
     'ParticleMixin', 'XsdAssert', 'XsdNotation', 'XsdSelector', 'XsdFieldSelector',
     'XsdIdentity', 'XsdKeyref', 'XsdKey', 'XsdUnique', 'Xsd11Keyref', 'Xsd11Key',
-    'Xsd11Unique', 'XsdFacet', 'XsdWhiteSpaceFacet', 'XsdLengthFacet', 'XsdMinLengthFacet',
+    'Xsd11Unique', 'SQLiteIdentityIndex',
+    'XsdFacet', 'XsdWhiteSpaceFacet', 'XsdLengthFacet', 'XsdMinLengthFacet',
     'XsdMaxLengthFacet', 'XsdMinExclusiveFacet', 'XsdMinInclusiveFacet',
     'XsdMaxExclusiveFacet', 'XsdMaxInclusiveFacet', 'XsdFractionDigitsFacet',
     'XsdTotalDigitsFacet', 'XsdExplicitTimezoneFacet', 'XsdPatternFacets',

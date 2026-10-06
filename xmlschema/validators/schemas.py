@@ -1220,7 +1220,8 @@ class XMLSchemaBase(XsdValidator, ElementPathMixin[Union[SchemaType, XsdElement]
                  extra_validator: Optional[ExtraValidatorType] = None,
                  validation_hook: Optional[ValidationHookType] = None,
                  allow_empty: bool = True,
-                 use_location_hints: bool = False) -> None:
+                 use_location_hints: bool = False,
+                 sqlite_identity_index_threshold: Optional[int] = None) -> None:
         """
         Validates an XML data against the XSD schema/component instance.
 
@@ -1260,6 +1261,7 @@ class XMLSchemaBase(XsdValidator, ElementPathMixin[Union[SchemaType, XsdElement]
         for error in self.iter_errors(source, path, schema_path, use_defaults,
                                       namespaces, max_depth, extra_validator,
                                       validation_hook, allow_empty, use_location_hints,
+                                      sqlite_identity_index_threshold,
                                       validation='strict'):
             raise error
 
@@ -1272,14 +1274,16 @@ class XMLSchemaBase(XsdValidator, ElementPathMixin[Union[SchemaType, XsdElement]
                  extra_validator: Optional[ExtraValidatorType] = None,
                  validation_hook: Optional[ValidationHookType] = None,
                  allow_empty: bool = True,
-                 use_location_hints: bool = False) -> bool:
+                 use_location_hints: bool = False,
+                 sqlite_identity_index_threshold: Optional[int] = None) -> bool:
         """
         Like :meth:`validate` except that does not raise an exception but returns
         ``True`` if the XML data instance is valid, ``False`` if it is invalid.
         """
         error = next(self.iter_errors(source, path, schema_path, use_defaults,
                                       namespaces, max_depth, extra_validator,
-                                      validation_hook, allow_empty, use_location_hints), None)
+                                      validation_hook, allow_empty, use_location_hints,
+                                      sqlite_identity_index_threshold), None)
         return error is None
 
     def iter_errors(self, source: Union[XMLSourceType, XMLResource],
@@ -1292,6 +1296,30 @@ class XMLSchemaBase(XsdValidator, ElementPathMixin[Union[SchemaType, XsdElement]
                     validation_hook: Optional[ValidationHookType] = None,
                     allow_empty: bool = True,
                     use_location_hints: bool = False,
+                    sqlite_identity_index_threshold: Optional[int] = None,
+                    validation: str = 'lax') \
+            -> Iterator[XMLSchemaValidationError]:
+        errors = self._iter_validation_errors(
+            source, path, schema_path, use_defaults, namespaces,
+            max_depth, extra_validator, validation_hook, allow_empty,
+            use_location_hints, sqlite_identity_index_threshold, validation
+        )
+        try:
+            yield from errors
+        finally:
+            errors.close()
+
+    def _iter_validation_errors(self, source: Union[XMLSourceType, XMLResource],
+                    path: Optional[str] = None,
+                    schema_path: Optional[str] = None,
+                    use_defaults: bool = True,
+                    namespaces: Optional[NsmapType] = None,
+                    max_depth: Optional[int] = None,
+                    extra_validator: Optional[ExtraValidatorType] = None,
+                    validation_hook: Optional[ValidationHookType] = None,
+                    allow_empty: bool = True,
+                    use_location_hints: bool = False,
+                    sqlite_identity_index_threshold: Optional[int] = None,
                     validation: str = 'lax') \
             -> Iterator[XMLSchemaValidationError]:
         """
@@ -1300,6 +1328,8 @@ class XMLSchemaBase(XsdValidator, ElementPathMixin[Union[SchemaType, XsdElement]
         """
         self.check_validator(validation='lax')
         resource = self.maps.settings.get_xml_resource(source)
+        if sqlite_identity_index_threshold is None:
+            sqlite_identity_index_threshold = self.maps.settings.sqlite_identity_index_threshold
         context = ValidationContext(
             source=resource,
             converter=NamespaceMapper(namespaces, source=resource),
@@ -1310,6 +1340,7 @@ class XMLSchemaBase(XsdValidator, ElementPathMixin[Union[SchemaType, XsdElement]
             max_depth=max_depth,
             extra_validator=extra_validator,
             validation_hook=validation_hook,
+            identity_index_threshold=sqlite_identity_index_threshold,
         )
 
         namespaces = context.namespaces
@@ -1355,7 +1386,8 @@ class XMLSchemaBase(XsdValidator, ElementPathMixin[Union[SchemaType, XsdElement]
                             if identity in identities:
                                 identities[identity].reset(ancestors[k])
                             else:
-                                identities[identity] = identity.get_counter(ancestors[k])
+                                identities[identity] = \
+                                    context.get_identity_counter(identity, ancestors[k])
 
                     prev_ancestors = ancestors[:]
 
@@ -1367,6 +1399,7 @@ class XMLSchemaBase(XsdValidator, ElementPathMixin[Union[SchemaType, XsdElement]
                     continue
                 else:
                     yield context.missing_element_error(validation, self, elem, path, schema_path)
+                    context.close_identity_index()
                     return
 
             try:
@@ -1385,10 +1418,14 @@ class XMLSchemaBase(XsdValidator, ElementPathMixin[Union[SchemaType, XsdElement]
 
         if context.identities is not identities:
             for identity, counter in context.identities.items():
-                identities[identity].counter.update(counter.counter)
+                if identity in identities:
+                    identities[identity].merge(counter)
+                else:
+                    identities[identity] = counter
             context.identities = identities
 
         yield from self._validate_references(validation, context)
+        context.close_identity_index()
 
     def _validate_references(self, validation: str, context: ValidationContext) \
             -> Iterator[XMLSchemaValidationError]:
@@ -1454,6 +1491,46 @@ class XMLSchemaBase(XsdValidator, ElementPathMixin[Union[SchemaType, XsdElement]
                     keep_unknown: bool = False,
                     process_skipped: bool = False,
                     max_depth: Optional[int] = None,
+                    sqlite_identity_index_threshold: Optional[int] = None,
+                    depth_filler: Optional[DepthFillerType] = None,
+                    extra_validator: Optional[ExtraValidatorType] = None,
+                    validation_hook: Optional[ValidationHookType] = None,
+                    value_hook: Optional[ValueHookType] = None,
+                    element_hook: Optional[ElementHookType] = None,
+                    errors: Optional[list[XMLSchemaValidationError]] = None,
+                    **kwargs: Any) -> Iterator[Union[Any, XMLSchemaValidationError]]:
+        results = self._iter_decode_impl(
+            source, path, schema_path, validation, process_namespaces, namespaces,
+            use_defaults, use_location_hints, decimal_type, datetime_types,
+            binary_types, converter, filler, fill_missing, keep_empty,
+            keep_unknown, process_skipped, max_depth,
+            sqlite_identity_index_threshold, depth_filler, extra_validator,
+            validation_hook, value_hook, element_hook, errors, **kwargs
+        )
+        try:
+            yield from results
+        finally:
+            results.close()
+
+    def _iter_decode_impl(self, source: Union[XMLSourceType, XMLResource],
+                    path: Optional[str] = None,
+                    schema_path: Optional[str] = None,
+                    validation: str = 'lax',
+                    process_namespaces: bool = True,
+                    namespaces: Optional[NsmapType] = None,
+                    use_defaults: bool = True,
+                    use_location_hints: bool = False,
+                    decimal_type: Optional[type[Any]] = None,
+                    datetime_types: bool = False,
+                    binary_types: bool = False,
+                    converter: Optional[ConverterType] = None,
+                    filler: Optional[FillerType] = None,
+                    fill_missing: bool = False,
+                    keep_empty: bool = False,
+                    keep_unknown: bool = False,
+                    process_skipped: bool = False,
+                    max_depth: Optional[int] = None,
+                    sqlite_identity_index_threshold: Optional[int] = None,
                     depth_filler: Optional[DepthFillerType] = None,
                     extra_validator: Optional[ExtraValidatorType] = None,
                     validation_hook: Optional[ValidationHookType] = None,
@@ -1508,6 +1585,8 @@ class XMLSchemaBase(XsdValidator, ElementPathMixin[Union[SchemaType, XsdElement]
         `processContents='skip'`.
         :param max_depth: maximum level of decoding, for default there is no limit. \
         With lazy resources is set to `source.lazy_depth` for managing lazy decoding.
+        :param sqlite_identity_index_threshold: store identity counters in a temporary \
+        SQLite database when a counter exceeds this number of distinct values.
         :param depth_filler: an optional callback function to replace data over the \
         *max_depth* level. The callback function must accept one positional argument, that \
         can be an XSD Element. If not provided deeper data are replaced with `None` values.
@@ -1538,6 +1617,8 @@ class XMLSchemaBase(XsdValidator, ElementPathMixin[Union[SchemaType, XsdElement]
         """
         self.check_validator(validation)
         resource = self.maps.settings.get_xml_resource(source)
+        if sqlite_identity_index_threshold is None:
+            sqlite_identity_index_threshold = self.maps.settings.sqlite_identity_index_threshold
         kwargs.update(
             process_namespaces=process_namespaces,
             namespaces=namespaces,
@@ -1562,7 +1643,11 @@ class XMLSchemaBase(XsdValidator, ElementPathMixin[Union[SchemaType, XsdElement]
             errors=errors
         )
         kwargs['converter'] = self.maps.settings.get_converter(source=resource, **kwargs)
-        context = DecodeContext(source=resource, **kwargs)
+        context = DecodeContext(
+            source=resource,
+            identity_index_threshold=sqlite_identity_index_threshold,
+            **kwargs
+        )
         namespaces = context.namespaces
 
         namespace = resource.namespace or namespaces.get('', '')
@@ -1611,6 +1696,7 @@ class XMLSchemaBase(XsdValidator, ElementPathMixin[Union[SchemaType, XsdElement]
 
         if context.max_depth is not None:
             yield from self._validate_references(validation, context)
+        context.close_identity_index()
 
     def decode(self, source: Union[XMLSourceType, XMLResource],
                path: Optional[str] = None,

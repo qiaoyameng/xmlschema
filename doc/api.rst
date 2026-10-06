@@ -336,6 +336,7 @@ a simple way to change default settings for imported package.
     .. autoattribute:: use_xpath3
     .. autoattribute:: use_meta
     .. autoattribute:: loglevel
+    .. autoattribute:: sqlite_identity_index_threshold
 
     .. automethod:: get_settings
     .. automethod:: get_defaults

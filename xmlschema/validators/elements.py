@@ -638,7 +638,7 @@ class XsdElement(XsdComponent, ParticleMixin,
             if identity in context.identities:
                 context.identities[identity].reset(obj)
             else:
-                context.identities[identity] = identity.get_counter(obj)
+                context.identities[identity] = context.get_identity_counter(identity, obj)
 
         if not context.level:
             # Need to set converter context with the right object (the resource can be lazy)
@@ -912,8 +912,10 @@ class XsdElement(XsdComponent, ParticleMixin,
                 context.validation_error(validation, self, err, obj)
             else:
                 if any(x is not None for x in fields) or nilled:
+                    source_url = getattr(context.source, 'url', None)
+                    source_line = getattr(obj, 'sourceline', None)
                     try:
-                        counter.increase(fields)
+                        counter.increase(fields, (source_url, source_line))
                     except ValueError as err:
                         context.validation_error(validation, self, err, obj)
 

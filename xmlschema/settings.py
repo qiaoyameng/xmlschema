@@ -20,7 +20,7 @@ from xmlschema.translation import gettext as _
 from xmlschema.arguments import BooleanOption, BaseUrlOption, AllowOption, \
     DefuseOption, LazyOption, BlockOption, UriMapperOption, IterParseOption, \
     SelectorOption, OpenerOption, PositiveIntOption, LocationsOption, \
-    ValidationOption, LogLevelOption
+    ValidationOption, LogLevelOption, OptionalNonNegIntOption
 from xmlschema.utils.decoding import raw_encode_value, raw_encode_attributes
 from xmlschema.utils.etree import is_etree_element, is_etree_document
 from xmlschema.resources import XMLResource
@@ -200,6 +200,13 @@ class SchemaSettings(ResourceSettings):
     For default is the logging level is set to WARNING (30). For INFO level set it
     with 20, for DEBUG level with 10. The default loglevel is restored after schema
     building, when exiting the initialization method.
+    """
+
+    sqlite_identity_index_threshold: OptionalNonNegIntOption = \
+        OptionalNonNegIntOption(default=None)
+    """
+    Store key, unique and keyref counters in a temporary SQLite database when the
+    number of distinct values of a counter exceeds this threshold.
     """
 
     _DEFAULT_SETTINGS = '_DEFAULT_SCHEMA_SETTINGS'

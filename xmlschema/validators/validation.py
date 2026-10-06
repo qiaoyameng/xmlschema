@@ -37,7 +37,7 @@ from xmlschema.resources import XMLResource
 from xmlschema.arguments import Arguments, BooleanOption, NonNegIntOption, \
     validate_type, Argument, MaxDepthOption, ExtraValidatorOption, \
     ValidationHookOption, FillerOption, ElementHookOption, DepthFillerOption, \
-    ValueHookOption, DecimalTypeOption, ElementTypeOption
+    ValueHookOption, DecimalTypeOption, ElementTypeOption, OptionalNonNegIntOption
 
 from .exceptions import XMLSchemaValidationError, \
     XMLSchemaChildrenValidationError, XMLSchemaDecodeError, XMLSchemaEncodeError
@@ -90,6 +90,7 @@ class ValidationArguments(Arguments):
     use_defaults = BooleanOption(default=True)
     check_identities = preserve_mixed = process_skipped = \
         use_location_hints = BooleanOption(default=False)
+    identity_index_threshold = OptionalNonNegIntOption(default=None)
 
 
 class DecodeArguments(ValidationArguments):
@@ -127,6 +128,7 @@ class ValidationContext:
                  'validation_only', 'check_identities', 'use_defaults',
                  'preserve_mixed', 'process_skipped', 'max_depth',
                  'extra_validator', 'validation_hook', 'use_location_hints',
+                 'identity_index_threshold', 'identity_index',
                  'inherited', 'id_map', 'identities', 'id_list', 'elem',
                  'attribute', 'patterns')
 
@@ -143,6 +145,7 @@ class ValidationContext:
                  extra_validator: Optional[ExtraValidatorType] = None,
                  validation_hook: Optional[ValidationHookType] = None,
                  use_location_hints: bool = False,
+                 identity_index_threshold: Optional[int] = None,
                  **kwargs: Any) -> None:
 
         self.source = source
@@ -162,10 +165,16 @@ class ValidationContext:
         self.extra_validator = extra_validator
         self.validation_hook = validation_hook
         self.use_location_hints = use_location_hints
+        self.identity_index_threshold = identity_index_threshold
 
         self.id_map: Counter[str] = Counter()
         self.identities: dict['XsdIdentity', 'IdentityCounter'] = {}
         self.inherited: dict[str, str] = {}
+        self.identity_index: Optional['SQLiteIdentityIndex'] = None
+
+        if check_identities and identity_index_threshold is not None:
+            from .identities import SQLiteIdentityIndex
+            self.identity_index = SQLiteIdentityIndex()
 
         # Local validation status
         self.id_list: Optional[list[Any]] = None
@@ -205,6 +214,21 @@ class ValidationContext:
         self.attribute = None
         self.id_list = None
         self.patterns = None
+        self.close_identity_index()
+
+    def close_identity_index(self) -> None:
+        if self.identity_index is not None:
+            self.identity_index.close()
+            self.identity_index = None
+
+    def get_identity_counter(self, identity: 'XsdIdentity',
+                             elem: ElementType) -> 'IdentityCounter':
+        if self.identity_index is None and self.identity_index_threshold is not None:
+            from .identities import SQLiteIdentityIndex
+            self.identity_index = SQLiteIdentityIndex()
+        return identity.get_counter(
+            elem, self.identity_index, self.identity_index_threshold
+        )
 
     @property
     def root_namespace(self) -> Optional[str]:

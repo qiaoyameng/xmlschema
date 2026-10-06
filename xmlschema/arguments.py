@@ -426,6 +426,10 @@ class MaxDepthOption(Option[Optional[int]]):
     _validators = none_int_validator, non_neg_int_validator
 
 
+class OptionalNonNegIntOption(Option[Optional[int]]):
+    _validators = none_int_validator, non_neg_int_validator
+
+
 class FillerOption(Option[Optional[FillerType]]):
     _validators = opt_callable_validator,
 

@@ -651,6 +651,11 @@ validation_hook
     element and its content are not processed. For validation only this function can
     also stop validation suddenly raising a `XMLSchemaStopValidation` exception.
 
+sqlite_identity_index_threshold
+    optional number of distinct identity-constraint values kept in memory. When a
+    key, unique or keyref counter exceeds the threshold, subsequent values are stored
+    in a temporary SQLite database that is deleted after validation or decoding ends.
+
 
 Decoding to JSON
 ================
