@@ -19,6 +19,8 @@ from .converters import ElementData, XMLSchemaConverter, \
 from .dataobjects import DataElement, DataElementConverter, DataBindingConverter
 from .documents import validate, is_valid, iter_errors, iter_decode, \
     to_dict, to_json, to_etree, from_json, XmlDocument
+from .instances import generate_xml_instance, InstanceResult, VALID, NO_SOLUTION, \
+    BUDGET_EXHAUSTED, UNSUPPORTED
 from .exports import download_schemas
 from .loaders import SchemaLoader, LocationSchemaLoader, SafeSchemaLoader
 from .utils.etree import etree_tostring
@@ -51,6 +53,8 @@ __all__ = [
     'DataElementConverter', 'DataBindingConverter', 'validate', 'is_valid',
     'iter_errors', 'iter_decode', 'to_dict', 'to_json', 'to_etree', 'from_json',
     'XmlDocument', 'download_schemas', 'ElementSelector', 'ElementPathSelector',
+    'generate_xml_instance', 'InstanceResult', 'VALID', 'NO_SOLUTION',
+    'BUDGET_EXHAUSTED', 'UNSUPPORTED',
     'SchemaLoader', 'LocationSchemaLoader', 'SafeSchemaLoader',
     'XMLSchemaValidatorError', 'XMLSchemaParseError', 'XMLSchemaNotBuiltError',
     'XMLSchemaModelError', 'XMLSchemaModelDepthError', 'XMLSchemaValidationError',

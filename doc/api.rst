@@ -51,6 +51,15 @@ Document level API
 .. autofunction:: xmlschema.from_json
 
 
+.. _instance-generation-api:
+
+Instance generation API
+=======================
+
+.. autofunction:: xmlschema.generate_xml_instance
+.. autoclass:: xmlschema.InstanceResult
+
+
 .. _schema-level-api:
 
 Schema level API
