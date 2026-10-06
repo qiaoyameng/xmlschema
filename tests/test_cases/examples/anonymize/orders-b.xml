@@ -1,0 +1,10 @@
+<o:ledger xmlns:o="http://example.com/orders">
+  <customer code="C100" region="AMER"><name>SAME-CODE-OTHER-DOC</name></customer>
+  <customer code="C300" region="EMEA"><name>Initech</name></customer>
+  <order id="O1000" customer="C100">
+    <line><seq>1</seq><item>DDD-4004</item></line>
+  </order>
+  <order id="O1002" customer="C300">
+    <line><seq>1</seq><item>EEE-5005</item></line>
+  </order>
+</o:ledger>

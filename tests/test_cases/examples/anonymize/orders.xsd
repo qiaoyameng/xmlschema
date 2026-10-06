@@ -1,0 +1,85 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<xs:schema xmlns:xs="http://www.w3.org/2001/XMLSchema"
+           xmlns:o="http://example.com/orders"
+           targetNamespace="http://example.com/orders"
+           elementFormDefault="unqualified">
+
+  <xs:simpleType name="customerCode">
+    <xs:restriction base="xs:string">
+      <xs:pattern value="C[0-9]{3}"/>
+    </xs:restriction>
+  </xs:simpleType>
+
+  <xs:simpleType name="regionCode">
+    <xs:restriction base="xs:string">
+      <xs:enumeration value="EMEA"/>
+      <xs:enumeration value="APAC"/>
+      <xs:enumeration value="AMER"/>
+    </xs:restriction>
+  </xs:simpleType>
+
+  <xs:simpleType name="lineNo">
+    <xs:restriction base="xs:positiveInteger">
+      <xs:maxInclusive value="9999"/>
+    </xs:restriction>
+  </xs:simpleType>
+
+  <xs:simpleType name="sku">
+    <xs:restriction base="xs:string">
+      <xs:pattern value="[A-Z]{3}-[0-9]{4}"/>
+    </xs:restriction>
+  </xs:simpleType>
+
+  <xs:element name="ledger">
+    <xs:complexType>
+      <xs:sequence>
+        <xs:element name="customer" maxOccurs="unbounded">
+          <xs:complexType>
+            <xs:sequence>
+              <xs:element name="name" type="xs:string"/>
+            </xs:sequence>
+            <xs:attribute name="code" type="o:customerCode" use="required"/>
+            <xs:attribute name="region" type="o:regionCode" use="required"/>
+          </xs:complexType>
+        </xs:element>
+
+        <xs:element name="order" maxOccurs="unbounded">
+          <xs:complexType>
+            <xs:sequence>
+              <xs:element name="line" maxOccurs="unbounded">
+                <xs:complexType>
+                  <xs:sequence>
+                    <xs:element name="seq" type="o:lineNo"/>
+                    <xs:element name="item" type="o:sku"/>
+                  </xs:sequence>
+                </xs:complexType>
+              </xs:element>
+            </xs:sequence>
+            <xs:attribute name="id" use="required">
+              <xs:simpleType>
+                <xs:restriction base="xs:string">
+                  <xs:pattern value="O[0-9]{4}"/>
+                </xs:restriction>
+              </xs:simpleType>
+            </xs:attribute>
+            <xs:attribute name="customer" type="o:customerCode" use="required"/>
+          </xs:complexType>
+          <xs:key name="orderLineKey">
+            <xs:selector xpath="line"/>
+            <xs:field xpath="seq"/>
+            <xs:field xpath="item"/>
+          </xs:key>
+          <xs:keyref name="orderCustomerRef" refer="o:customerKey">
+            <xs:selector xpath="."/>
+            <xs:field xpath="@customer"/>
+          </xs:keyref>
+        </xs:element>
+      </xs:sequence>
+    </xs:complexType>
+
+    <xs:key name="customerKey">
+      <xs:selector xpath="customer"/>
+      <xs:field xpath="@code"/>
+    </xs:key>
+  </xs:element>
+</xs:schema>
