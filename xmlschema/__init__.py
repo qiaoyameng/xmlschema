@@ -19,7 +19,7 @@ from .converters import ElementData, XMLSchemaConverter, \
 from .dataobjects import DataElement, DataElementConverter, DataBindingConverter
 from .documents import validate, is_valid, iter_errors, iter_decode, \
     to_dict, to_json, to_etree, from_json, XmlDocument
-from .exports import download_schemas
+from .exports import download_schemas, rewrite_namespace_prefixes
 from .loaders import SchemaLoader, LocationSchemaLoader, SafeSchemaLoader
 from .utils.etree import etree_tostring
 from .utils.urls import normalize_url, normalize_locations
@@ -50,7 +50,8 @@ __all__ = [
     'AbderaConverter', 'JsonMLConverter', 'ColumnarConverter', 'DataElement',
     'DataElementConverter', 'DataBindingConverter', 'validate', 'is_valid',
     'iter_errors', 'iter_decode', 'to_dict', 'to_json', 'to_etree', 'from_json',
-    'XmlDocument', 'download_schemas', 'ElementSelector', 'ElementPathSelector',
+    'XmlDocument', 'download_schemas', 'rewrite_namespace_prefixes',
+    'ElementSelector', 'ElementPathSelector',
     'SchemaLoader', 'LocationSchemaLoader', 'SafeSchemaLoader',
     'XMLSchemaValidatorError', 'XMLSchemaParseError', 'XMLSchemaNotBuiltError',
     'XMLSchemaModelError', 'XMLSchemaModelDepthError', 'XMLSchemaValidationError',

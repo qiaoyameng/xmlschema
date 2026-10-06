@@ -233,6 +233,7 @@ XML resources API
 .. autofunction:: xmlschema.fetch_schema_locations
 .. autofunction:: xmlschema.fetch_schema
 .. autofunction:: xmlschema.download_schemas
+.. autofunction:: xmlschema.rewrite_namespace_prefixes
 
 .. autoclass:: xmlschema.XMLResource
 
