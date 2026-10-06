@@ -147,3 +147,64 @@ interrelated set of definitions in multiple namespaces. The XMLResource base
 class and schema validation assure a fully checked WSDL document with
 protections against XML attacks.
 See :class:`xmlschema.extras.wsdl.Wsdl11Document` API for details.
+
+
+.. _anonymize-documents:
+
+Anonymizing documents at identity constraint level
+==================================================
+
+The module *xmlschema.extras.anonymize* provides the function
+:func:`xmlschema.extras.anonymize.anonymize_document` for anonymizing the
+business keys of an XML document that has to be shared externally, keeping
+the referential integrity expressed by *xs:key*/*xs:keyref* identity
+constraints.
+
+For each requested *xs:key*/*xs:unique* constraint a one-to-one mapping is
+built within every scope, composite keys are handled as a whole and all the
+references are updated accordingly. Replacement values can be provided by
+the caller or produced by a restricted generator and must satisfy the XSD
+type and the facets of the original fields. The operation is atomic: on a
+target value collision, when no legal value can be generated or when a
+reference cannot be resolved, the whole run fails with an
+:class:`xmlschema.extras.anonymize.AnonymizationError` and no partially
+anonymized document is produced.
+
+The result contains the anonymized document and a controlled mapping
+receipt; the original key values are never logged and are included in the
+receipt only on explicit request:
+
+.. doctest::
+
+    >>> from xmlschema.extras.anonymize import anonymize_document
+    >>> schema_source = '''<xs:schema xmlns:xs="http://www.w3.org/2001/XMLSchema">
+    ...   <xs:element name="company">
+    ...     <xs:complexType><xs:sequence>
+    ...       <xs:element name="employee" maxOccurs="unbounded">
+    ...         <xs:complexType><xs:attribute name="empId" type="xs:string"/></xs:complexType>
+    ...       </xs:element>
+    ...       <xs:element name="assignment" minOccurs="0" maxOccurs="unbounded">
+    ...         <xs:complexType><xs:attribute name="empRef" type="xs:string"/></xs:complexType>
+    ...       </xs:element>
+    ...     </xs:sequence></xs:complexType>
+    ...     <xs:key name="empKey">
+    ...       <xs:selector xpath="employee"/><xs:field xpath="@empId"/>
+    ...     </xs:key>
+    ...     <xs:keyref name="empRef" refer="empKey">
+    ...       <xs:selector xpath="assignment"/><xs:field xpath="@empRef"/>
+    ...     </xs:keyref>
+    ...   </xs:element>
+    ... </xs:schema>'''
+    >>> document = '<company><employee empId="E100"/><assignment empRef="E100"/></company>'
+    >>> result = anonymize_document(schema_source, document, ['empKey'], seed=1)
+    >>> 'E100' in result.document
+    False
+    >>> print(result.document)
+    <company><employee empId="anon-91b7584a2265b1f5" /><assignment empRef="anon-91b7584a2265b1f5" /></company>
+    >>> entry, = result.receipt.entries
+    >>> entry.original is None and len(entry.fingerprint) == 16
+    True
+
+A command line interface is also available running the module as a script,
+for example ``python -m xmlschema.extras.anonymize schema.xsd doc.xml
+empKey -o anonymized.xml -r receipt.json --seed 1``.
