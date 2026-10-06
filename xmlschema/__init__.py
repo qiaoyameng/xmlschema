@@ -22,6 +22,7 @@ from .documents import validate, is_valid, iter_errors, iter_decode, \
 from .exports import download_schemas
 from .loaders import SchemaLoader, LocationSchemaLoader, SafeSchemaLoader
 from .utils.etree import etree_tostring
+from .utils.prefixes import rewrite_namespace_prefixes
 from .utils.urls import normalize_url, normalize_locations
 
 from .validators import (
@@ -59,4 +60,5 @@ __all__ = [
     'XMLSchemaTypeTableWarning', 'XMLSchemaAssertPathWarning',
     'XsdGlobals', 'XMLSchemaBase', 'XMLSchema', 'XMLSchema10', 'XMLSchema11',
     'XsdComponent', 'XsdType', 'XsdElement', 'XsdAttribute',
+    'rewrite_namespace_prefixes',
 ]
