@@ -1211,6 +1211,36 @@ class XMLSchemaBase(XsdValidator, ElementPathMixin[Union[SchemaType, XsdElement]
 
         return f'{{{namespace}}}{local_name}'
 
+    def generate_instance(self, *, name: Optional[str] = None,
+                          seed: int = 0,
+                          max_nodes: int = 200,
+                          max_occurs: int = 3):
+        """
+        Generate a small, valid XML element instance from this schema.
+
+        See :func:`xmlschema.generation.generate_instance` for details.
+        """
+        from ..generation import generate_instance
+        return generate_instance(
+            self, name=name, seed=seed,
+            max_nodes=max_nodes, max_occurs=max_occurs,
+        )
+
+    def generate_xml(self, *, name: Optional[str] = None,
+                     seed: int = 0,
+                     max_nodes: int = 200,
+                     max_occurs: int = 3):
+        """
+        Non-raising variant of :meth:`generate_instance`, returning a
+        :class:`xmlschema.generation.GenerationResult` that distinguishes
+        success, no-solution, budget-exhausted and unsupported outcomes.
+        """
+        from ..generation import generate_xml
+        return generate_xml(
+            self, name=name, seed=seed,
+            max_nodes=max_nodes, max_occurs=max_occurs,
+        )
+
     def validate(self, source: Union[XMLSourceType, XMLResource],
                  path: Optional[str] = None,
                  schema_path: Optional[str] = None,
