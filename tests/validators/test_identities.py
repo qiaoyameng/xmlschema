@@ -9,11 +9,17 @@
 # @author Davide Brunato <brunato@sissa.it>
 #
 import pathlib
+import tempfile
 import xml.etree.ElementTree as ElementTree
+from decimal import Decimal
+from pathlib import Path
+
+from elementpath.datatypes import XsdToken
 
 from xmlschema import XMLSchemaParseError, XMLSchemaValidationError
 from xmlschema.validators import XMLSchema11
-from xmlschema.validators.identities import IdentityCounter, KeyrefCounter, FieldValueSelector
+from xmlschema.validators.identities import IdentityCounter, KeyrefCounter, \
+    FieldValueSelector, SQLiteIdentityIndex
 from xmlschema.testing import XsdValidatorTestCase
 
 
@@ -386,6 +392,226 @@ class TestXsdIdentities(XsdValidatorTestCase):
         with self.assertRaises(XMLSchemaValidationError) as ctx:
             schema.validate(xml_file)
         self.assertIn("field selects multiple values", str(ctx.exception))
+
+    def test_sqlite_identity_index_matches_memory_mode(self):
+        schema = self.check_schema("""
+            <xs:element name="root">
+              <xs:complexType>
+                <xs:choice maxOccurs="unbounded">
+                  <xs:element name="key-item" type="xs:string"/>
+                  <xs:element name="ref-item" type="xs:string"/>
+                </xs:choice>
+              </xs:complexType>
+              <xs:key name="k">
+                <xs:selector xpath="key-item"/>
+                <xs:field xpath="."/>
+              </xs:key>
+              <xs:keyref name="r" refer="k">
+                <xs:selector xpath="ref-item"/>
+                <xs:field xpath="."/>
+              </xs:keyref>
+            </xs:element>""")
+
+        values = ['a'] * 500 + ['b']
+        valid_forward_ref = \
+            '<root><ref-item>b</ref-item>' + \
+            ''.join(f'<key-item>{v}</key-item>' for v in values) + '</root>'
+        invalid_forward_ref = valid_forward_ref.replace('<ref-item>b</ref-item>',
+                                                         '<ref-item>missing</ref-item>')
+        duplicated_key = \
+            '<root>' + ''.join(f'<key-item>{v}</key-item>' for v in values) + \
+            '<key-item>a</key-item></root>'
+
+        for xml_data in (valid_forward_ref, invalid_forward_ref, duplicated_key):
+            self.assertEqual(
+                schema.is_valid(xml_data),
+                schema.is_valid(xml_data, identity_index_threshold=0)
+            )
+
+    def test_sqlite_identity_index_type_equivalence(self):
+        cases = (
+            ('xs:token', ' a ', 'a'),
+            ('xs:decimal', '1.0', '1.00'),
+            ('xs:integer', '01', '1'),
+            ('xs:dateTime', '2026-01-01T00:00:00Z',
+             '2026-01-01T08:00:00+08:00'),
+            ('xs:boolean', 'true', '1'),
+            ('xs:float', '1.0', '1'),
+            ('xs:float', '-0', '0'),
+            ('xs:float', 'NaN', 'NaN'),
+        )
+
+        for xsd_type, first, second in cases:
+            schema = self.check_schema(f"""
+                <xs:element name="root">
+                  <xs:complexType>
+                    <xs:sequence>
+                      <xs:element name="item" type="{xsd_type}"
+                                  maxOccurs="unbounded"/>
+                    </xs:sequence>
+                  </xs:complexType>
+                  <xs:key name="k">
+                    <xs:selector xpath="item"/>
+                    <xs:field xpath="."/>
+                  </xs:key>
+                </xs:element>""")
+            xml_data = f'<root><item>{first}</item><item>{second}</item></root>'
+            self.assertFalse(schema.is_valid(xml_data))
+            self.assertFalse(schema.is_valid(xml_data, identity_index_threshold=0))
+
+    def test_sqlite_identity_index_qname_equivalence(self):
+        schema = self.check_schema("""
+            <xs:element name="root">
+              <xs:complexType>
+                <xs:sequence>
+                  <xs:element name="item" type="xs:QName" maxOccurs="unbounded"/>
+                </xs:sequence>
+              </xs:complexType>
+              <xs:key name="k">
+                <xs:selector xpath="item"/>
+                <xs:field xpath="."/>
+              </xs:key>
+            </xs:element>""")
+
+        xml_data = '<root xmlns:p="urn:x" xmlns:q="urn:x">' \
+                   '<item>p:name</item><item>q:name</item></root>'
+        self.assertFalse(schema.is_valid(xml_data))
+        self.assertFalse(schema.is_valid(xml_data, identity_index_threshold=0))
+
+    def test_sqlite_identity_index_nested_scopes(self):
+        schema = self.check_schema("""
+            <xs:element name="node">
+              <xs:complexType>
+                <xs:choice maxOccurs="unbounded">
+                  <xs:element name="id" type="xs:string"/>
+                  <xs:element name="reference" type="xs:string"/>
+                  <xs:element ref="node"/>
+                </xs:choice>
+              </xs:complexType>
+              <xs:key name="same-name">
+                <xs:selector xpath="id"/>
+                <xs:field xpath="."/>
+              </xs:key>
+              <xs:keyref name="same-name-ref" refer="same-name">
+                <xs:selector xpath="reference"/>
+                <xs:field xpath="."/>
+              </xs:keyref>
+            </xs:element>""")
+
+        valid_xml = '<node><id>a</id><node><id>a</id></node>' \
+                    '<node><id>a</id><node><id>a</id></node></node></node>'
+        invalid_xml = '<node><id>a</id>' \
+                      '<node><reference>missing</reference><id>a</id></node></node>'
+
+        self.assertTrue(schema.is_valid(valid_xml))
+        self.assertTrue(schema.is_valid(valid_xml, identity_index_threshold=0))
+        self.assertFalse(schema.is_valid(invalid_xml))
+        self.assertFalse(schema.is_valid(invalid_xml, identity_index_threshold=0))
+
+    def test_sqlite_identity_index_threshold_spill_for_unique_reference(self):
+        schema = self.check_schema("""
+            <xs:element name="root">
+              <xs:complexType>
+                <xs:choice maxOccurs="unbounded">
+                  <xs:element name="key-item" type="xs:string"/>
+                  <xs:element name="ref-item" type="xs:string"/>
+                </xs:choice>
+              </xs:complexType>
+              <xs:unique name="u">
+                <xs:selector xpath="key-item"/>
+                <xs:field xpath="."/>
+              </xs:unique>
+              <xs:keyref name="r" refer="u">
+                <xs:selector xpath="ref-item"/>
+                <xs:field xpath="."/>
+              </xs:keyref>
+            </xs:element>""")
+
+        self.assertTrue(schema.is_valid(
+            '<root><ref-item>x</ref-item><key-item>x</key-item></root>',
+            identity_index_threshold=2
+        ))
+        self.assertFalse(schema.is_valid(
+            '<root><ref-item>y</ref-item><key-item>x</key-item></root>',
+            identity_index_threshold=2
+        ))
+
+    def test_sqlite_identity_index_cleanup(self):
+        schema = self.check_schema("""
+            <xs:element name="root">
+              <xs:complexType>
+                <xs:sequence>
+                  <xs:element name="item" type="xs:string" maxOccurs="unbounded"/>
+                </xs:sequence>
+              </xs:complexType>
+              <xs:key name="k">
+                <xs:selector xpath="item"/>
+                <xs:field xpath="."/>
+              </xs:key>
+            </xs:element>""")
+        temp_dir = Path(tempfile.gettempdir())
+
+        schema.validate('<root><item>a</item></root>', identity_index_threshold=0)
+        with self.assertRaises(XMLSchemaValidationError):
+            schema.validate('<root><item>a</item><item>a</item></root>',
+                            identity_index_threshold=0)
+        with self.assertRaises(XMLSchemaValidationError):
+            schema.validate('<unknown/>', identity_index_threshold=0)
+
+        self.assertFalse(list(temp_dir.glob('xmlschema-identity-*.sqlite3')))
+
+    def test_sqlite_identity_index_stores_composite_keys_and_locations(self):
+        schema = self.check_schema("""
+            <xs:element name="root">
+              <xs:complexType>
+                <xs:sequence>
+                  <xs:element name="item" maxOccurs="unbounded">
+                    <xs:complexType>
+                      <xs:simpleContent>
+                        <xs:extension base="xs:decimal">
+                          <xs:attribute name="kind" type="xs:token"/>
+                        </xs:extension>
+                      </xs:simpleContent>
+                    </xs:complexType>
+                  </xs:element>
+                </xs:sequence>
+              </xs:complexType>
+              <xs:unique name="composite">
+                <xs:selector xpath="item"/>
+                <xs:field xpath="."/>
+                <xs:field xpath="@kind"/>
+              </xs:unique>
+            </xs:element>""")
+
+        elem = ElementTree.Element('root')
+        identity = schema.identities['composite']
+        index = SQLiteIdentityIndex(0)
+        counter = identity.get_counter(elem, index)
+        try:
+            counter.increase((Decimal('1.00'), XsdToken('A')),
+                             source_line=12, source_path='/tmp/document.xml')
+            with self.assertRaises(ValueError):
+                counter.increase((Decimal('1'), XsdToken(' A ')),
+                                 source_line=18, source_path='/tmp/document.xml')
+
+            entries = index.connection.execute(
+                '''SELECT occurrence_count, source_line, source_path
+                   FROM entries WHERE scope_id=? AND identity_id=?''',
+                (counter.scope_id, id(identity))
+            ).fetchall()
+            occurrences = index.connection.execute(
+                '''SELECT source_line, source_path FROM occurrences
+                   WHERE scope_id=? AND identity_id=?
+                   ORDER BY occurrence_id''',
+                (counter.scope_id, id(identity))
+            ).fetchall()
+
+            self.assertEqual(entries, [(2, 12, '/tmp/document.xml')])
+            self.assertEqual(occurrences,
+                             [(12, '/tmp/document.xml'),
+                              (18, '/tmp/document.xml')])
+        finally:
+            index.close()
 
 
 class TestXsd11Identities(TestXsdIdentities):

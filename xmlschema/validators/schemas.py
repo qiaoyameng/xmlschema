@@ -1220,7 +1220,8 @@ class XMLSchemaBase(XsdValidator, ElementPathMixin[Union[SchemaType, XsdElement]
                  extra_validator: Optional[ExtraValidatorType] = None,
                  validation_hook: Optional[ValidationHookType] = None,
                  allow_empty: bool = True,
-                 use_location_hints: bool = False) -> None:
+                 use_location_hints: bool = False,
+                 identity_index_threshold: Optional[int] = None) -> None:
         """
         Validates an XML data against the XSD schema/component instance.
 
@@ -1255,12 +1256,15 @@ class XMLSchemaBase(XsdValidator, ElementPathMixin[Union[SchemaType, XsdElement]
         :param use_location_hints: for default schema locations hints provided within \
         XML data are ignored in order to avoid the change of schema instance. Set this \
         option to `True` to activate dynamic schema loading using schema location hints.
+        :param identity_index_threshold: if set, stores identity counters in a temporary \
+        SQLite database after the provided number of field occurrences. `0` and `1` \
+        force disk-backed indexing from the first value.
         :raises: :exc:`XMLSchemaValidationError` if the XML data instance is invalid.
         """
         for error in self.iter_errors(source, path, schema_path, use_defaults,
                                       namespaces, max_depth, extra_validator,
                                       validation_hook, allow_empty, use_location_hints,
-                                      validation='strict'):
+                                      identity_index_threshold, validation='strict'):
             raise error
 
     def is_valid(self, source: Union[XMLSourceType, XMLResource],
@@ -1272,14 +1276,16 @@ class XMLSchemaBase(XsdValidator, ElementPathMixin[Union[SchemaType, XsdElement]
                  extra_validator: Optional[ExtraValidatorType] = None,
                  validation_hook: Optional[ValidationHookType] = None,
                  allow_empty: bool = True,
-                 use_location_hints: bool = False) -> bool:
+                 use_location_hints: bool = False,
+                 identity_index_threshold: Optional[int] = None) -> bool:
         """
         Like :meth:`validate` except that does not raise an exception but returns
         ``True`` if the XML data instance is valid, ``False`` if it is invalid.
         """
         error = next(self.iter_errors(source, path, schema_path, use_defaults,
                                       namespaces, max_depth, extra_validator,
-                                      validation_hook, allow_empty, use_location_hints), None)
+                                      validation_hook, allow_empty, use_location_hints,
+                                      identity_index_threshold), None)
         return error is None
 
     def iter_errors(self, source: Union[XMLSourceType, XMLResource],
@@ -1292,6 +1298,7 @@ class XMLSchemaBase(XsdValidator, ElementPathMixin[Union[SchemaType, XsdElement]
                     validation_hook: Optional[ValidationHookType] = None,
                     allow_empty: bool = True,
                     use_location_hints: bool = False,
+                    identity_index_threshold: Optional[int] = None,
                     validation: str = 'lax') \
             -> Iterator[XMLSchemaValidationError]:
         """
@@ -1310,8 +1317,21 @@ class XMLSchemaBase(XsdValidator, ElementPathMixin[Union[SchemaType, XsdElement]
             max_depth=max_depth,
             extra_validator=extra_validator,
             validation_hook=validation_hook,
+            identity_index_threshold=identity_index_threshold,
         )
+        try:
+            yield from self._iter_errors(
+                context, resource, path, schema_path, namespaces,
+                validation, allow_empty
+            )
+        finally:
+            context.close()
 
+    def _iter_errors(self, context: ValidationContext, resource: XMLResource,
+                     path: Optional[str], schema_path: Optional[str],
+                     namespaces: Optional[NsmapType],
+                     validation: str, allow_empty: bool) \
+            -> Iterator[XMLSchemaValidationError]:
         namespaces = context.namespaces
         identities = context.identities
         ancestors: list[Element] = []
@@ -1352,10 +1372,13 @@ class XMLSchemaBase(XsdValidator, ElementPathMixin[Union[SchemaType, XsdElement]
                     # Clear identity constraints counters
                     for k, e in enumerate(xsd_ancestors[k:], start=k):
                         for identity in e.identities:
-                            if identity in identities:
-                                identities[identity].reset(ancestors[k])
+                            counter = identities.get(identity)
+                            if counter is not None:
+                                counter.reset(ancestors[k])
                             else:
-                                identities[identity] = identity.get_counter(ancestors[k])
+                                identities[identity] = identity.get_counter(
+                                    ancestors[k], context.identity_index
+                                )
 
                     prev_ancestors = ancestors[:]
 
@@ -1385,7 +1408,9 @@ class XMLSchemaBase(XsdValidator, ElementPathMixin[Union[SchemaType, XsdElement]
 
         if context.identities is not identities:
             for identity, counter in context.identities.items():
-                identities[identity].counter.update(counter.counter)
+                target_counter = identities.get(identity)
+                if target_counter is not None:
+                    target_counter.merge(counter)
             context.identities = identities
 
         yield from self._validate_references(validation, context)
@@ -1459,6 +1484,7 @@ class XMLSchemaBase(XsdValidator, ElementPathMixin[Union[SchemaType, XsdElement]
                     validation_hook: Optional[ValidationHookType] = None,
                     value_hook: Optional[ValueHookType] = None,
                     element_hook: Optional[ElementHookType] = None,
+                    identity_index_threshold: Optional[int] = None,
                     errors: Optional[list[XMLSchemaValidationError]] = None,
                     **kwargs: Any) -> Iterator[Union[Any, XMLSchemaValidationError]]:
         """
@@ -1532,6 +1558,9 @@ class XMLSchemaBase(XsdValidator, ElementPathMixin[Union[SchemaType, XsdElement]
         instance plus optionally the XSD element and the XSD type, and returns a \
         new `ElementData` instance.
         :param errors: optional internal collector for validation errors.
+        :param identity_index_threshold: if set, stores identity counters in a temporary \
+        SQLite database after the provided number of field occurrences. `0` and `1` \
+        force disk-backed indexing from the first value.
         :param kwargs: keyword arguments with other options for building converter instances.
         :return: yields a decoded data object, eventually preceded by a sequence of \
         validation or decoding errors.
@@ -1559,10 +1588,23 @@ class XMLSchemaBase(XsdValidator, ElementPathMixin[Union[SchemaType, XsdElement]
             validation_hook=validation_hook,
             value_hook=value_hook,
             element_hook=element_hook,
+            identity_index_threshold=identity_index_threshold,
             errors=errors
         )
         kwargs['converter'] = self.maps.settings.get_converter(source=resource, **kwargs)
         context = DecodeContext(source=resource, **kwargs)
+        try:
+            yield from self._iter_decode_body(context, resource, path, schema_path,
+                                               validation, errors, kwargs)
+        finally:
+            context.close()
+
+    def _iter_decode_body(self, context: DecodeContext, resource: XMLResource,
+                          path: Optional[str], schema_path: Optional[str],
+                          validation: str,
+                          errors: Optional[list[XMLSchemaValidationError]],
+                          decoder_options: dict[str, Any]) \
+            -> Iterator[Union[Any, XMLSchemaValidationError]]:
         namespaces = context.namespaces
 
         namespace = resource.namespace or namespaces.get('', '')
@@ -1576,11 +1618,13 @@ class XMLSchemaBase(XsdValidator, ElementPathMixin[Union[SchemaType, XsdElement]
         elif not resource.is_lazy():
             selector = iter((resource.root,))
         else:
+            decoder_kwargs = decoder_options.copy()
+            decoder_kwargs['identity_index_threshold'] = None
             decoder = self.raw_decoder(
                 source=resource,
                 schema_path=resource.get_absolute_path(),
                 validation=validation,
-                **kwargs
+                **decoder_kwargs
             )
             context.depth_filler = lambda x: decoder
             context.max_depth = resource.lazy_depth

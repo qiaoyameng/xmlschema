@@ -45,7 +45,7 @@ from .exceptions import XMLSchemaValidationError, \
 if TYPE_CHECKING:
     from .xsdbase import XsdValidator  # noqa: F401
     from .facets import XsdPatternFacets  # noqa: F401
-    from .identities import XsdIdentity, IdentityCounter  # noqa: F401
+    from .identities import XsdIdentity, IdentityCounter, SQLiteIdentityIndex  # noqa: F401
 
 logger = logging.getLogger('xmlschema')
 
@@ -127,7 +127,9 @@ class ValidationContext:
                  'validation_only', 'check_identities', 'use_defaults',
                  'preserve_mixed', 'process_skipped', 'max_depth',
                  'extra_validator', 'validation_hook', 'use_location_hints',
-                 'inherited', 'id_map', 'identities', 'id_list', 'elem',
+                 'inherited', 'id_map', 'identities', 'identity_index',
+                 '_owns_identity_index',
+                 'id_list', 'elem',
                  'attribute', 'patterns')
 
     def __init__(self,
@@ -143,6 +145,7 @@ class ValidationContext:
                  extra_validator: Optional[ExtraValidatorType] = None,
                  validation_hook: Optional[ValidationHookType] = None,
                  use_location_hints: bool = False,
+                 identity_index_threshold: Optional[int] = None,
                  **kwargs: Any) -> None:
 
         self.source = source
@@ -162,6 +165,15 @@ class ValidationContext:
         self.extra_validator = extra_validator
         self.validation_hook = validation_hook
         self.use_location_hints = use_location_hints
+        if identity_index_threshold is not None and identity_index_threshold < 0:
+            raise ValueError(_("identity index threshold can't be negative"))
+        self.identity_index: Optional['SQLiteIdentityIndex']
+        if identity_index_threshold is None:
+            self.identity_index = None
+        else:
+            from .identities import SQLiteIdentityIndex
+            self.identity_index = SQLiteIdentityIndex(identity_index_threshold)
+        self._owns_identity_index = True
 
         self.id_map: Counter[str] = Counter()
         self.identities: dict['XsdIdentity', 'IdentityCounter'] = {}
@@ -186,6 +198,7 @@ class ValidationContext:
         context.identities = self.identities.copy()
         context.inherited = self.inherited.copy()
         context.id_list = self.id_list if self.id_list is None else self.id_list.copy()
+        context._owns_identity_index = False
 
         if self.converter.xmlns_processing == 'none':
             context.converter = self.converter
@@ -205,6 +218,19 @@ class ValidationContext:
         self.attribute = None
         self.id_list = None
         self.patterns = None
+
+    def close(self) -> None:
+        if self.identity_index is not None and self._owns_identity_index:
+            self.identity_index.close()
+        self.identity_index = None
+
+    def __enter__(self) -> 'ValidationContext':
+        return self
+
+    def __exit__(self, exc_type: Optional[type[BaseException]],
+                 exc_value: Optional[BaseException],
+                 traceback: Any) -> None:
+        self.close()
 
     @property
     def root_namespace(self) -> Optional[str]:

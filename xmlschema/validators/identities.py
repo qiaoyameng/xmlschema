@@ -11,15 +11,22 @@
 This module contains classes for other XML Schema identity constraints.
 """
 import copy
-import re
 import math
+import os
+import pickle
+import re
+import sqlite3
+import tempfile
 from collections import Counter
 from collections.abc import Iterator
+from datetime import timezone
+from decimal import Decimal
 from typing import TYPE_CHECKING, cast, Any, Optional, Union
 
 from elementpath import ElementPathError, XPathContext, \
     ElementNode, translate_pattern, AttributeNode
-from elementpath.datatypes import UntypedAtomic
+from elementpath.datatypes import UntypedAtomic, AbstractDateTime, Duration, \
+    AbstractBinary, QName, XsdToken, NormalizedString
 from elementpath.xpath_nodes import EtreeElementNode
 
 import xmlschema.names as nm
@@ -42,6 +49,70 @@ if TYPE_CHECKING:
 
 IdentityFieldItemType = Union[AtomicValueType, XsdAttribute, tuple[Any, ...], None]
 IdentityCounterType = tuple[IdentityFieldItemType, ...]
+IdentityIndexType = Optional['SQLiteIdentityIndex']
+
+_SEQUENCE_MARKER = object()
+
+
+def _collapse_white_spaces(value: str) -> str:
+    return re.sub(r'[\t\n\r ]+', ' ', value.strip())
+
+
+def _encode_identity_value(value: IdentityFieldItemType) -> Any:
+    if value is None:
+        return None
+    elif isinstance(value, bool):
+        return value, bool
+    elif isinstance(value, tuple) and len(value) == 2:
+        if value[1] is bool and isinstance(value[0], bool):
+            return value
+        elif value[1] is float:
+            if value[0] == 'nan':
+                return 'float-nan'
+            return float(value[0]) + 0.0, float
+
+    if isinstance(value, tuple):
+        return _SEQUENCE_MARKER, tuple(_encode_identity_value(x) for x in value)
+    elif isinstance(value, list):
+        return _SEQUENCE_MARKER, tuple(_encode_identity_value(x) for x in value)
+    elif isinstance(value, bool):
+        return value, bool
+    elif isinstance(value, XsdToken):
+        return 'token', _collapse_white_spaces(str(value))
+    elif isinstance(value, NormalizedString):
+        return 'normalized-string', re.sub(r'[\t\n\r]', ' ', str(value))
+    elif isinstance(value, QName):
+        return 'qname', value.uri, value.local_name
+    elif isinstance(value, float):
+        return value + 0.0, float
+    elif isinstance(value, Decimal):
+        decimal_value = value.normalize()
+        if decimal_value == 0:
+            decimal_value = Decimal(0)
+        return 'decimal', format(decimal_value, 'f')
+    elif isinstance(value, AbstractDateTime):
+        dt = value._dt
+        if dt.tzinfo is not None:
+            dt = dt.astimezone(timezone.utc).replace(tzinfo=None)
+        return type(value).__name__, value._year, dt.isoformat()
+    elif isinstance(value, Duration):
+        seconds = format(value.seconds.normalize(), 'f')
+        return type(value).__name__, value.months, seconds
+    elif isinstance(value, AbstractBinary):
+        return type(value).__name__, value.decode()
+
+    return value
+
+
+def _encode_identity_fields(fields: IdentityCounterType) -> bytes:
+    return pickle.dumps(
+        tuple(_encode_identity_value(value) for value in fields),
+        protocol=pickle.HIGHEST_PROTOCOL
+    )
+
+
+def _decode_identity_fields(data: bytes) -> IdentityCounterType:
+    return cast(IdentityCounterType, pickle.loads(data))
 
 
 # XSD identities use a restricted XPath 2.0 parser. The XMLSchemaProxy is
@@ -245,7 +316,10 @@ class XsdIdentity(XsdComponent):
                     self.elements[e] = [FieldValueSelector(f, e) for f in self.fields]
                     e.selected_by.add(self)
 
-    def get_counter(self, elem: ElementType) -> 'IdentityCounter':
+    def get_counter(self, elem: ElementType,
+                    index: IdentityIndexType = None) -> 'IdentityCounter':
+        if index is not None:
+            return index.get_counter(self, elem)
         return IdentityCounter(self, elem)
 
 
@@ -333,8 +407,11 @@ class XsdKeyref(XsdIdentity):
 
             self.refer_path = refer_path
 
-    def get_counter(self, elem: ElementType) -> 'KeyrefCounter':
-        return KeyrefCounter(self, elem)
+    def get_counter(self, elem: ElementType,
+                    index: IdentityIndexType = None) -> 'KeyrefCounter':
+        if index is None:
+            return KeyrefCounter(self, elem)
+        return index.get_counter(self, elem)
 
 
 class Xsd11Unique(XsdUnique):
@@ -361,12 +438,247 @@ class Xsd11Keyref(XsdKeyref):
             super()._parse()
 
 
+class SQLiteIdentityIndex:
+    """Temporary SQLite backend for identity constraint counters."""
+
+    __slots__ = ('path', 'connection', 'threshold', 'total_occurrences',
+                 '_counters')
+
+    def __init__(self, threshold: int = 0) -> None:
+        fd, self.path = tempfile.mkstemp(prefix='xmlschema-identity-',
+                                         suffix='.sqlite3')
+        os.close(fd)
+        self.connection: sqlite3.Connection
+        try:
+            connection = sqlite3.connect(self.path)
+            self.connection = connection
+            connection.execute('PRAGMA synchronous=OFF')
+            connection.execute('PRAGMA temp_store=MEMORY')
+            connection.execute('PRAGMA foreign_keys=ON')
+            connection.executescript('''
+                CREATE TABLE scopes (
+                    scope_id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    identity_id INTEGER NOT NULL,
+                    elem_id INTEGER NOT NULL
+                );
+                CREATE TABLE entries (
+                    scope_id INTEGER NOT NULL,
+                    identity_id INTEGER NOT NULL,
+                    fields BLOB NOT NULL,
+                    is_reference INTEGER NOT NULL,
+                    occurrence_count INTEGER NOT NULL,
+                    first_seq INTEGER NOT NULL,
+                    source_line INTEGER,
+                    source_path TEXT,
+                    PRIMARY KEY (scope_id, identity_id, fields),
+                    FOREIGN KEY (scope_id) REFERENCES scopes(scope_id)
+                        ON DELETE CASCADE
+                );
+                CREATE TABLE occurrences (
+                    occurrence_id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    scope_id INTEGER NOT NULL,
+                    identity_id INTEGER NOT NULL,
+                    fields BLOB NOT NULL,
+                    source_line INTEGER,
+                    source_path TEXT,
+                    FOREIGN KEY (scope_id) REFERENCES scopes(scope_id)
+                        ON DELETE CASCADE
+                );
+                CREATE INDEX idx_identity_entries
+                    ON entries(scope_id, identity_id, fields);
+                CREATE INDEX idx_identity_occurrences
+                    ON occurrences(scope_id, identity_id, fields);
+            ''')
+        except Exception:
+            if hasattr(self, 'connection'):
+                self.connection.close()
+            os.unlink(self.path)
+            raise
+
+        self.threshold = threshold
+        self.total_occurrences = 0
+        self._counters: set['SpillIdentityCounter'] = set()
+
+    @property
+    def spilled(self) -> bool:
+        return self.threshold <= 1 or self.total_occurrences >= self.threshold
+
+    def get_counter(self, identity: XsdIdentity, elem: ElementType) \
+            -> 'IdentityCounter':
+        if self.spilled:
+            if isinstance(identity, XsdKeyref):
+                return SQLiteKeyrefCounter(identity, elem, self)
+            return SQLiteIdentityCounter(identity, elem, self)
+        elif isinstance(identity, XsdKeyref):
+            return SpillKeyrefCounter(identity, elem, self)
+        else:
+            return SpillIdentityCounter(identity, elem, self)
+
+    def register(self, counter: 'SpillIdentityCounter') -> None:
+        self._counters.add(counter)
+
+    def unregister(self, counter: 'SpillIdentityCounter') -> None:
+        self._counters.discard(counter)
+
+    def add_memory_value(self) -> bool:
+        self.total_occurrences += 1
+        return self.spilled
+
+    def spill_pending(self) -> None:
+        for counter in list(self._counters):
+            counter.spill_to_sqlite()
+
+    def new_scope(self, identity: XsdIdentity, elem: ElementType) -> int:
+        cursor = self.connection.execute(
+            'INSERT INTO scopes(identity_id, elem_id) VALUES (?, ?)',
+            (id(identity), id(elem))
+        )
+        return cast(int, cursor.lastrowid)
+
+    def reset_scope(self, scope_id: int, identity: XsdIdentity,
+                    elem: ElementType) -> int:
+        self.connection.execute('DELETE FROM scopes WHERE scope_id=?', (scope_id,))
+        return self.new_scope(identity, elem)
+
+    def add_value(self, scope_id: int, identity: XsdIdentity,
+                  fields: IdentityCounterType, is_reference: bool,
+                  source_line: Optional[int], source_path: Optional[str]) -> None:
+        encoded_fields = _encode_identity_fields(fields)
+        identity_id = id(identity)
+        cursor = self.connection.execute(
+            '''SELECT occurrence_count, first_seq FROM entries
+               WHERE scope_id=? AND identity_id=? AND fields=?''',
+            (scope_id, identity_id, encoded_fields)
+        )
+        row = cursor.fetchone()
+        occurrence_cursor = self.connection.execute(
+            '''INSERT INTO occurrences(scope_id, identity_id, fields,
+                                       source_line, source_path)
+               VALUES (?, ?, ?, ?, ?)''',
+            (scope_id, identity_id, encoded_fields, source_line, source_path)
+        )
+        occurrence_id = cast(int, occurrence_cursor.lastrowid)
+
+        duplicate_value = False
+        if row is None:
+            self.connection.execute(
+                '''INSERT INTO entries(scope_id, identity_id, fields, is_reference,
+                                      occurrence_count, first_seq, source_line,
+                                      source_path)
+                   VALUES (?, ?, ?, ?, 1, ?, ?, ?)''',
+                (scope_id, identity_id, encoded_fields, int(is_reference),
+                 occurrence_id, source_line, source_path)
+            )
+        else:
+            occurrence_count, first_seq = row
+            self.connection.execute(
+                '''UPDATE entries SET occurrence_count=?, first_seq=?
+                   WHERE scope_id=? AND identity_id=? AND fields=?''',
+                (occurrence_count + 1, min(first_seq, occurrence_id),
+                 scope_id, identity_id, encoded_fields)
+            )
+            duplicate_value = occurrence_count == 1 and not is_reference
+        self.connection.commit()
+        if duplicate_value:
+            msg = _("duplicated value {0!r} for {1!r}")
+            raise XMLSchemaValueError(msg.format(fields, identity))
+
+    def migrate_values(
+            self, scope_id: int, identity: XsdIdentity,
+            values: list[tuple[IdentityCounterType, Optional[int], Optional[str]]]) -> None:
+        identity_id = id(identity)
+        is_reference = isinstance(identity, XsdKeyref)
+        for fields, source_line, source_path in values:
+            encoded_fields = _encode_identity_fields(fields)
+            cursor = self.connection.execute(
+                '''SELECT occurrence_count, first_seq FROM entries
+                   WHERE scope_id=? AND identity_id=? AND fields=?''',
+                (scope_id, identity_id, encoded_fields)
+            )
+            row = cursor.fetchone()
+            occurrence_cursor = self.connection.execute(
+                '''INSERT INTO occurrences(scope_id, identity_id, fields,
+                                           source_line, source_path)
+                   VALUES (?, ?, ?, ?, ?)''',
+                (scope_id, identity_id, encoded_fields, source_line, source_path)
+            )
+            occurrence_id = cast(int, occurrence_cursor.lastrowid)
+            if row is None:
+                self.connection.execute(
+                    '''INSERT INTO entries(scope_id, identity_id, fields, is_reference,
+                                          occurrence_count, first_seq, source_line,
+                                          source_path)
+                       VALUES (?, ?, ?, ?, 1, ?, ?, ?)''',
+                    (scope_id, identity_id, encoded_fields, int(is_reference),
+                     occurrence_id, source_line, source_path)
+                )
+            else:
+                occurrence_count, first_seq = row
+                self.connection.execute(
+                    '''UPDATE entries SET occurrence_count=?, first_seq=?
+                       WHERE scope_id=? AND identity_id=? AND fields=?''',
+                    (occurrence_count + 1, min(first_seq, occurrence_id),
+                     scope_id, identity_id, encoded_fields)
+                )
+        self.connection.commit()
+
+    def reference_exists(self, scope_id: int, identity: XsdIdentity,
+                         fields: IdentityCounterType, encoded_fields: bytes) -> bool:
+        row = self.connection.execute(
+            '''SELECT 1 FROM entries WHERE scope_id=? AND identity_id=? AND fields=?''',
+            (scope_id, id(identity), encoded_fields)
+        ).fetchone()
+        if row is not None:
+            return True
+        elif len(fields) != 1:
+            return False
+
+        fallback_fields: IdentityCounterType = (fields[0],)
+        row = self.connection.execute(
+            '''SELECT 1 FROM entries WHERE scope_id=? AND identity_id=? AND fields=?''',
+            (scope_id, id(identity), _encode_identity_fields(fallback_fields))
+        ).fetchone()
+        return row is not None
+
+    def iter_missing_references(self, keyref_scope_id: int,
+                                keyref: XsdKeyref,
+                                refer_scope_id: int,
+                                refer: XsdIdentity) \
+            -> Iterator[tuple[IdentityCounterType, int]]:
+        rows = self.connection.execute(
+            '''SELECT fields, occurrence_count FROM entries
+               WHERE scope_id=? AND identity_id=?
+               ORDER BY first_seq''',
+            (keyref_scope_id, id(keyref))
+        ).fetchall()
+        for encoded_fields, occurrence_count in rows:
+            fields = _decode_identity_fields(encoded_fields)
+            if not self.reference_exists(refer_scope_id, refer, fields, encoded_fields):
+                yield fields, occurrence_count
+
+    def close(self) -> None:
+        self.connection.close()
+        try:
+            os.unlink(self.path)
+        except FileNotFoundError:
+            pass
+
+    def __enter__(self) -> 'SQLiteIdentityIndex':
+        return self
+
+    def __exit__(self, exc_type: Optional[type[BaseException]],
+                 exc_value: Optional[BaseException],
+                 traceback: Any) -> None:
+        self.close()
+
+
 class IdentityCounter:
     elements: Optional[set[Any]]  # don't need to check, should be only etree elements anyway
 
     __slots__ = ('elements', 'counter', 'identity', 'elem', 'enabled')
 
-    def __init__(self, identity: XsdIdentity, elem: ElementType) -> None:
+    def __init__(self, identity: XsdIdentity, elem: ElementType,
+                 index: IdentityIndexType = None) -> None:
         self.counter: Counter[IdentityCounterType] = Counter[IdentityCounterType]()
         self.identity = identity
         self.elem = elem
@@ -382,22 +694,152 @@ class IdentityCounter:
         self.enabled = True
         self.elements = None
 
-    def increase(self, fields: IdentityCounterType) -> None:
+    def increase(self, fields: IdentityCounterType,
+                 source_line: Optional[int] = None,
+                 source_path: Optional[str] = None) -> None:
         self.counter[fields] += 1
         if self.counter[fields] == 2:
             msg = _("duplicated value {0!r} for {1!r}")
             raise XMLSchemaValueError(msg.format(fields, self.identity))
 
+    def merge(self, counter: 'IdentityCounter') -> None:
+        self.counter.update(counter.counter)
+
+
+class SpillIdentityCounter(IdentityCounter):
+    index: SQLiteIdentityIndex
+    sqlite_counter: Optional['SQLiteIdentityCounter']
+
+    __slots__ = ('index', 'sqlite_counter', 'pending_values')
+
+    def __init__(self, identity: XsdIdentity, elem: ElementType,
+                 index: SQLiteIdentityIndex) -> None:
+        super().__init__(identity, elem)
+        self.index = index
+        self.sqlite_counter = None
+        self.pending_values: list[
+            tuple[IdentityCounterType, Optional[int], Optional[str]]
+        ] = []
+        index.register(self)
+
+    def reset(self, elem: ElementType) -> None:
+        if self.sqlite_counter is None:
+            super().reset(elem)
+            self.pending_values.clear()
+        else:
+            self.sqlite_counter.reset(elem)
+            self.elem = elem
+            self.pending_values.clear()
+
+    @property
+    def scope_id(self) -> int:
+        if self.sqlite_counter is None:
+            raise AttributeError('scope_id')
+        return self.sqlite_counter.scope_id
+
+    def increase(self, fields: IdentityCounterType,
+                 source_line: Optional[int] = None,
+                 source_path: Optional[str] = None) -> None:
+        if self.sqlite_counter is not None:
+            self.sqlite_counter.increase(fields, source_line, source_path)
+            return
+
+        if self.index.spilled:
+            self.spill_to_sqlite()
+            self.sqlite_counter.increase(fields, source_line, source_path)
+            return
+
+        if self.index.add_memory_value():
+            self.spill_to_sqlite()
+            self.sqlite_counter.increase(fields, source_line, source_path)
+        else:
+            self.pending_values.append((fields, source_line, source_path))
+            self.counter[fields] += 1
+            if self.counter[fields] == 2:
+                msg = _("duplicated value {0!r} for {1!r}")
+                raise XMLSchemaValueError(msg.format(fields, self.identity))
+
+    def merge(self, counter: IdentityCounter) -> None:
+        if self.sqlite_counter is not None:
+            return
+        super().merge(counter)
+
+    def spill_to_sqlite(self) -> None:
+        if self.sqlite_counter is not None:
+            return
+
+        sqlite_counter = SQLiteIdentityCounter(self.identity, self.elem, self.index)
+        sqlite_counter.elements = self.elements
+        sqlite_counter.enabled = self.enabled
+        sqlite_counter.migrate(self.pending_values)
+        self.sqlite_counter = sqlite_counter
+        self.counter.clear()
+        self.pending_values.clear()
+        self.index.unregister(self)
+
+
+class SQLiteIdentityCounter(IdentityCounter):
+    index: SQLiteIdentityIndex
+    scope_id: int
+
+    __slots__ = ('index', 'scope_id')
+
+    def __init__(self, identity: XsdIdentity, elem: ElementType,
+                 index: SQLiteIdentityIndex) -> None:
+        super().__init__(identity, elem)
+        self.index = index
+        self.scope_id = index.new_scope(identity, elem)
+
+    def __repr__(self) -> str:
+        items = self.index.connection.execute(
+            '''SELECT fields, occurrence_count FROM entries
+               WHERE scope_id=? AND identity_id=?
+               ORDER BY first_seq''',
+            (self.scope_id, id(self.identity))
+        ).fetchall()
+        return "%s(%r)" % (
+            self.__class__.__name__[:-7],
+            {_decode_identity_fields(fields): count for fields, count in items}
+        )
+
+    def reset(self, elem: ElementType) -> None:
+        self.scope_id = self.index.reset_scope(self.scope_id, self.identity, elem)
+        self.elem = elem
+        self.enabled = True
+        self.elements = None
+
+    def increase(self, fields: IdentityCounterType,
+                 source_line: Optional[int] = None,
+                 source_path: Optional[str] = None) -> None:
+        self.index.add_value(
+            self.scope_id, self.identity, fields, False,
+            source_line, source_path
+        )
+
+    def merge(self, counter: IdentityCounter) -> None:
+        pass
+
+    def migrate(
+            self,
+            values: list[tuple[IdentityCounterType, Optional[int], Optional[str]]]
+    ) -> None:
+        self.index.migrate_values(self.scope_id, self.identity, values)
+
 
 class KeyrefCounter(IdentityCounter):
     identity: XsdKeyref
+    refer: Optional[XsdIdentity]
 
     def __init__(self, identity: XsdIdentity, elem: ElementType) -> None:
         super().__init__(identity, elem)
         if isinstance(self.identity.refer, (XsdKey, XsdUnique)):
             self.refer = self.identity.refer
+        else:
+            self.refer = None
 
-    def increase(self, fields: IdentityCounterType) -> None:
+    def increase(self, fields: IdentityCounterType,
+                 source_line: Optional[int] = None,
+                 source_path: Optional[str] = None) -> None:
         self.counter[fields] += 1
 
     def iter_errors(self, identities: dict[XsdIdentity, IdentityCounter]) \
@@ -416,6 +858,118 @@ class KeyrefCounter(IdentityCounter):
             else:
                 msg = "value {} not found for {!r}"
                 yield XMLSchemaValueError(msg.format(v, self.identity.refer))
+
+
+class SpillKeyrefCounter(SpillIdentityCounter, KeyrefCounter):
+    identity: XsdKeyref
+
+    __slots__ = ()
+
+    def __init__(self, identity: XsdIdentity, elem: ElementType,
+                 index: SQLiteIdentityIndex) -> None:
+        super().__init__(identity, elem, index)
+        if isinstance(identity.refer, (XsdKey, XsdUnique)):
+            self.refer = identity.refer
+        else:
+            self.refer = None
+
+    def increase(self, fields: IdentityCounterType,
+                 source_line: Optional[int] = None,
+                 source_path: Optional[str] = None) -> None:
+        if self.sqlite_counter is not None:
+            self.sqlite_counter.increase(fields, source_line, source_path)
+            return
+
+        if self.index.spilled:
+            self.spill_to_sqlite()
+            self.sqlite_counter.increase(fields, source_line, source_path)
+            return
+
+        if self.index.add_memory_value():
+            self.spill_to_sqlite()
+            self.sqlite_counter.increase(fields, source_line, source_path)
+        else:
+            self.pending_values.append((fields, source_line, source_path))
+            self.counter[fields] += 1
+
+    def iter_errors(self, identities: dict[XsdIdentity, IdentityCounter]) \
+            -> Iterator[XMLSchemaValueError]:
+        if self.sqlite_counter is None and self.index.spilled:
+            self.spill_to_sqlite()
+
+        if self.sqlite_counter is not None:
+            sqlite_counter = cast(SQLiteKeyrefCounter, self.sqlite_counter)
+            yield from sqlite_counter.iter_errors(identities)
+        else:
+            yield from KeyrefCounter.iter_errors(self, identities)
+
+    def spill_to_sqlite(self) -> None:
+        if self.sqlite_counter is not None:
+            return
+
+        sqlite_counter = SQLiteKeyrefCounter(self.identity, self.elem, self.index)
+        sqlite_counter.elements = self.elements
+        sqlite_counter.enabled = self.enabled
+        sqlite_counter.refer = self.refer
+        sqlite_counter.migrate(self.pending_values)
+        self.sqlite_counter = sqlite_counter
+        self.counter.clear()
+        self.pending_values.clear()
+        self.index.unregister(self)
+
+
+class SQLiteKeyrefCounter(SQLiteIdentityCounter, KeyrefCounter):
+    identity: XsdKeyref
+
+    __slots__ = ()
+
+    def __init__(self, identity: XsdIdentity, elem: ElementType,
+                 index: SQLiteIdentityIndex) -> None:
+        super().__init__(identity, elem, index)
+        if isinstance(identity.refer, (XsdKey, XsdUnique)):
+            self.refer = identity.refer
+        else:
+            self.refer = None
+
+    def increase(self, fields: IdentityCounterType,
+                 source_line: Optional[int] = None,
+                 source_path: Optional[str] = None) -> None:
+        self.index.add_value(
+            self.scope_id, self.identity, fields, True,
+            source_line, source_path
+        )
+
+    def iter_errors(self, identities: dict[XsdIdentity, IdentityCounter]) \
+            -> Iterator[XMLSchemaValueError]:
+        if self.refer is None:
+            return
+
+        self.index.spill_pending()
+
+        try:
+            refer_counter = identities[self.refer]
+        except KeyError:
+            return
+
+        if not isinstance(refer_counter, SQLiteIdentityCounter):
+            if isinstance(refer_counter, SpillIdentityCounter) \
+                    and refer_counter.sqlite_counter is not None:
+                refer_counter = refer_counter.sqlite_counter
+            else:
+                yield from KeyrefCounter.iter_errors(self, identities)
+                return
+
+        for fields, occurrence_count in self.index.iter_missing_references(
+                self.scope_id, self.identity,
+                refer_counter.scope_id, self.refer):
+            if occurrence_count > 1:
+                msg = "value {} not found for {!r} ({} times)"
+                yield XMLSchemaValueError(msg.format(
+                    fields, self.refer, occurrence_count
+                ))
+            else:
+                msg = "value {} not found for {!r}"
+                yield XMLSchemaValueError(msg.format(fields, self.identity.refer))
 
 
 class FieldValueSelector:
@@ -497,7 +1051,16 @@ class FieldValueSelector:
                 msg = _("%r field doesn't have a simple type!")
                 raise XMLSchemaTypeError(msg % self.field)
             elif xsd_type.is_qname():
-                value = get_extended_qname(node.string_value.strip(), namespaces)
+                qname_value = get_extended_qname(node.string_value.strip(), namespaces)
+                try:
+                    if isinstance(qname_value, str) and '{' in qname_value:
+                        namespace_end = qname_value.rfind('}')
+                        value = QName(qname_value[1:namespace_end],
+                                      qname_value[namespace_end + 1:])
+                    else:
+                        value = QName(None, qname_value)
+                except ValueError:
+                    value = qname_value
             elif xsd_type.is_boolean():
                 # Workarounds for discovered issues with XPath processors
                 value = xsd_type.text_decode(node.string_value.strip())
