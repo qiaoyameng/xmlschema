@@ -327,7 +327,7 @@ class DecodeContext(ValidationContext):
 
     __slots__ = ('decimal_type', 'datetime_types', 'binary_types', 'filler',
                  'fill_missing', 'keep_empty', 'keep_unknown', 'depth_filler',
-                 'value_hook', 'element_hook', 'keep_datatypes')
+                 'value_hook', 'element_hook', 'keep_datatypes', 'opaque_counter')
 
     def __init__(self,
                  source: XMLResource,
@@ -357,6 +357,7 @@ class DecodeContext(ValidationContext):
         self.depth_filler = depth_filler
         self.value_hook = value_hook
         self.element_hook = element_hook
+        self.opaque_counter = [0]
 
         keep_datatypes: list[type[DecodedValueType]] = [int, float, list]
         if decimal_type is None:
@@ -378,7 +379,8 @@ class EncodeContext(ValidationContext):
 
     _arguments = EncodeArguments
 
-    __slots__ = ('unordered', 'untyped_data', 'indent', 'etree_element_class')
+    __slots__ = ('unordered', 'untyped_data', 'indent', 'etree_element_class',
+                 'opaque_counter')
 
     def __init__(self,
                  source: Any,
@@ -394,6 +396,7 @@ class EncodeContext(ValidationContext):
         self.untyped_data = untyped_data
         self.indent = converter.indent
         self.etree_element_class = converter.etree_element_class
+        self.opaque_counter = [0]
 
         super().__init__(source, converter, **kwargs)
 

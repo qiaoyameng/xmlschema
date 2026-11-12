@@ -13,13 +13,15 @@ from itertools import chain
 from typing import TYPE_CHECKING, Any, Optional, TypeVar, Union
 from xml.etree.ElementTree import Element
 
-from xmlschema.aliases import NsmapType, BaseXsdType, XmlnsType
-from xmlschema.exceptions import XMLSchemaTypeError, XMLSchemaValueError
+from xmlschema.aliases import NsmapType, BaseXsdType, XmlnsType, ElementType
+from xmlschema.exceptions import XMLSchemaTypeError, XMLSchemaValueError, \
+    XMLResourceExceeded
 from xmlschema.namespaces import NamespaceMapper
 from xmlschema.arguments import ConverterArguments
 from xmlschema.resources import XMLResource
 from xmlschema.utils.misc import iter_class_slots, deprecated
 from xmlschema.utils.qnames import get_namespace
+from xmlschema import _limits
 
 if TYPE_CHECKING:
     from xmlschema.validators import XsdElement  # noqa: F401
@@ -40,6 +42,165 @@ declarations.
 """
 
 T = TypeVar('T')
+
+
+class OpaqueElement:
+    """
+    Snapshot of an element subtree that the schema can't process with a typed
+    declaration (an unrecognized content matched by a wildcard with
+    ``processContents='lax'`` or ``processContents='skip'``).
+
+    The snapshot stores only plain data (strings and nested instances), so it
+    remains valid after the origin element tree is released (e.g. a lazy
+    :class:`~xmlschema.resources.XMLResource` that clears parsed subtrees).
+
+    :ivar tag: the element tag, kept in extended QName form (``{uri}local``).
+    :ivar text: the character data directly contained in the element.
+    :ivar tail: the character data following the element in the parent.
+    :ivar attrib: a copy of the element attributes, with names in extended form.
+    :ivar children: the ordered element children, each an :class:`OpaqueElement` \
+    or an integer/string couple for mixed character data parts.
+    :ivar nsmap: the namespace declarations visible on the element, mapping \
+    prefixes (the empty string for the default namespace) to URIs.
+    """
+
+    __slots__ = ('tag', 'text', 'tail', 'attrib', 'children', 'nsmap')
+
+    def __init__(self, elem: ElementType, namespaces: Optional[NsmapType] = None,
+                 _depth: int = 0, _count: Optional[list[int]] = None,
+                 _limit: Optional[int] = None) -> None:
+        if _depth >= _limits.MAX_XML_DEPTH:
+            msg = "opaque wildcard subtree exceeds MAX_XML_DEPTH={}"
+            raise XMLResourceExceeded(msg.format(_limits.MAX_XML_DEPTH))
+
+        if _count is not None:
+            _count[0] += 1
+            if _limit is not None and _count[0] > _limit:
+                msg = "opaque wildcard limit ({}) exceeded for element {!r}"
+                raise XMLResourceExceeded(msg.format(_limit, elem.tag))
+
+        if not isinstance(elem.tag, str):
+            raise XMLSchemaTypeError("opaque elements can't wrap comments or "
+                                     "processing instructions")
+
+        self.tag = elem.tag
+        self.text = elem.text
+        self.tail = elem.tail
+        self.attrib = dict(elem.attrib)
+
+        children: list[Union['OpaqueElement', tuple[int, str]]] = []
+        cdata_index = 1
+        for child in elem:
+            if callable(child.tag):
+                continue  # skip comments and processing instructions
+            children.append(OpaqueElement(
+                child, namespaces, _depth + 1, _count, _limit
+            ))
+            if child.tail and child.tail.strip():
+                children.append((cdata_index, child.tail.strip()))
+                cdata_index += 1
+        self.children = children
+
+        if namespaces:
+            self.nsmap = {k: v for k, v in namespaces.items() if v}
+        else:
+            self.nsmap = {}
+
+    def __repr__(self) -> str:
+        return f'{self.__class__.__name__}({self.tag!r})'
+
+    def __eq__(self, other: object) -> bool:
+        if not isinstance(other, OpaqueElement):
+            return NotImplemented
+        return (self.tag == other.tag and self.text == other.text
+                and self.tail == other.tail and self.attrib == other.attrib
+                and self.children == other.children)
+
+    def __ne__(self, other: object) -> bool:
+        result = self.__eq__(other)
+        return result if result is NotImplemented else not result
+
+    def count_elements(self) -> int:
+        """Returns the number of element nodes in the snapshot."""
+        return 1 + sum(child.count_elements()
+                       for child in self.children if isinstance(child, OpaqueElement))
+
+    def iter_namespaces(self) -> Iterator[tuple[str, str]]:
+        """Yields the namespace declarations needed for serializing the subtree."""
+        declared: set[str] = set()
+
+        def collect(qname: str) -> None:
+            if qname and qname[0] == '{':
+                uri = get_namespace(qname)
+                if uri and uri not in declared:
+                    declared.add(uri)
+
+        def walk(node: 'OpaqueElement') -> Iterator[tuple[str, str]]:
+            collect(node.tag)
+            for name in node.attrib:
+                collect(name)
+            for prefix, uri in node.nsmap.items():
+                if uri not in declared:
+                    declared.add(uri)
+                    yield prefix, uri
+            for child in node.children:
+                if isinstance(child, OpaqueElement):
+                    yield from walk(child)
+
+        yield from walk(self)
+
+    def to_etree(self, etree_element_class: type[Element] = Element,
+                 nsmap: Optional[NsmapType] = None) -> ElementType:
+        """
+        Builds an independent ElementTree element from the snapshot. The necessary
+        namespace declarations are added to the root element; original prefixes
+        and whitespace are not reconstructed.
+        """
+        namespaces = dict(nsmap or ())
+        for prefix, uri in self.iter_namespaces():
+            if uri in namespaces.values():
+                continue
+            if prefix and prefix not in namespaces:
+                namespaces[prefix] = uri
+            else:
+                namespaces[self._auto_prefix(uri, namespaces)] = uri
+
+        if type(etree_element_class) is type(Element):
+            elem = etree_element_class(self.tag)
+        else:
+            elem = etree_element_class(
+                self.tag,
+                nsmap={prefix if prefix else None: uri
+                       for prefix, uri in namespaces.items()}
+            )
+        self._build(elem, etree_element_class)
+        return elem
+
+    @staticmethod
+    def _auto_prefix(uri: str, nsmap: NsmapType) -> str:
+        index = 0
+        while f'ns{index}' in nsmap:
+            index += 1
+        return f'ns{index}'
+
+    def _build(self, elem: ElementType,
+               etree_element_class: type[Element]) -> None:
+        elem.attrib.update(self.attrib)
+        elem.text = self.text
+
+        previous: Optional[ElementType] = None
+        for child in self.children:
+            if isinstance(child, OpaqueElement):
+                child_elem = etree_element_class(child.tag)
+                elem.append(child_elem)
+                child._build(child_elem, etree_element_class)
+                previous = child_elem
+            else:
+                _index, text = child
+                if previous is None:
+                    elem.text = (elem.text or '') + text
+                else:
+                    previous.tail = (previous.tail or '') + text
 
 
 def stackable(method: Callable[..., T]) -> Callable[..., T]:
@@ -106,12 +267,18 @@ class XMLSchemaConverter(NamespaceMapper):
     :ivar preserve_root: preserve the root element on decoding
     :ivar force_dict: force dictionary for complex elements with simple content
     :ivar force_list: force list for child elements
+    :ivar opaque_wildcard: if set to `True` element subtrees matching a wildcard \
+    with *lax* or *skip* processing that can't be resolved to a typed element are \
+    kept as :class:`OpaqueElement` snapshots instead of being discarded.
+    :ivar opaque_wildcard_limit: maximum number of opaque elements kept in a single \
+    decoded subtree. If `None` only the package safety limits are applied.
     """
     _arguments = ConverterArguments
     ns_prefix: str
 
     __slots__ = ('dict_class', 'list_class', 'text_key', 'ns_prefix', 'attr_prefix',
-                 'cdata_prefix', 'preserve_root', 'force_dict', 'force_list')
+                 'cdata_prefix', 'preserve_root', 'force_dict', 'force_list',
+                 'opaque_wildcard', 'opaque_wildcard_limit')
 
     def __init__(self, namespaces: Optional[NsmapType] = None,
                  dict_class: Optional[type[dict[str, Any]]] = None,
@@ -129,6 +296,8 @@ class XMLSchemaConverter(NamespaceMapper):
                  preserve_root: bool = False,
                  force_dict: bool = False,
                  force_list: bool = False,
+                 opaque_wildcard: bool = False,
+                 opaque_wildcard_limit: Optional[int] = None,
                  **kwargs: Any) -> None:
 
         self.dict_class: type[dict[str, Any]]
@@ -161,6 +330,8 @@ class XMLSchemaConverter(NamespaceMapper):
         self.preserve_root = preserve_root
         self.force_dict = force_dict
         self.force_list = force_list
+        self.opaque_wildcard = opaque_wildcard
+        self.opaque_wildcard_limit = opaque_wildcard_limit
 
         super().__init__(
             namespaces, process_namespaces, strip_namespaces, xmlns_processing, source
@@ -303,6 +474,19 @@ class XMLSchemaConverter(NamespaceMapper):
         """Returns `True` if the name is a xmlns declaration."""
         return name.startswith(self.ns_prefix) and \
             (name == self.ns_prefix or name.startswith(f'{self.ns_prefix}:'))
+
+    def opaque_snapshot(self, elem: ElementType,
+                        counter: Optional[list[int]] = None) -> 'OpaqueElement':
+        """
+        Builds an :class:`OpaqueElement` snapshot of an unrecognized wildcard
+        subtree. Raises :class:`~xmlschema.exceptions.XMLResourceExceeded` if
+        the configured *opaque_wildcard_limit* or the package safety limits
+        are exceeded.
+        """
+        count = [0] if counter is None else counter
+        return OpaqueElement(
+            elem, self.namespaces, _count=count, _limit=self.opaque_wildcard_limit
+        )
 
     def get_effective_xmlns(self, xmlns: XmlnsType, level: int,
                             xsd_element: Optional['XsdElement'] = None) -> XmlnsType:

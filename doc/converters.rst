@@ -54,6 +54,29 @@ Moreover there are also other two converters useful for specific cases:
     schema bindings (available since release v1.5.0).
 
 
+Opaque wildcard content
+=======================
+
+XSD wildcards with ``processContents='lax'`` or ``processContents='skip'`` admit
+element content that is not declared by the schema. By default this content is
+discarded during decoding. Providing the *opaque_wildcard* option to the default
+converter, the unrecognized subtrees are retained as
+:class:`xmlschema.OpaqueElement` snapshots::
+
+    schema = xmlschema.XMLSchema('schema.xsd')
+    data = schema.decode('document.xml', opaque_wildcard=True)
+    xml_data = schema.encode(data, opaque_wildcard=True)
+
+A snapshot keeps expanded names, attributes, mixed character data and the order
+of children, and is independent from the source tree (also for lazy resources).
+On encoding the necessary namespace declarations are rebuilt; original prefixes
+and whitespace are not guaranteed to be preserved. Elements recognized by the
+schema are still decoded and encoded with their typed declarations, and strict
+wildcards keep rejecting unknown content. The *opaque_wildcard_limit* option can
+be used to set a maximum number of opaque element nodes; exceeding the limit
+raises a :class:`xmlschema.exceptions.XMLResourceExceeded` exception.
+
+
 Create a custom converter
 =========================
 

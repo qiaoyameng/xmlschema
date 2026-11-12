@@ -422,8 +422,12 @@ class ElementClassOption(Option[Optional[type[ElementType]]]):
         raise XMLSchemaTypeError(msg.format(value, self, str, float))
 
 
-class MaxDepthOption(Option[Optional[int]]):
+class OptionalIntOption(Option[Optional[int]]):
     _validators = none_int_validator, non_neg_int_validator
+
+
+class MaxDepthOption(OptionalIntOption):
+    pass
 
 
 class FillerOption(Option[Optional[FillerType]]):
@@ -480,3 +484,5 @@ class ConverterArguments(NsMapperArguments):
     preserve_root = BooleanOption(default=False)
     force_dict = BooleanOption(default=False)
     force_list = BooleanOption(default=False)
+    opaque_wildcard = BooleanOption(default=False)
+    opaque_wildcard_limit = OptionalIntOption(default=None)

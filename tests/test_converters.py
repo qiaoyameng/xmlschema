@@ -12,7 +12,7 @@ import unittest
 import warnings
 from pathlib import Path
 from typing import cast, MutableMapping, Optional, Type
-from xml.etree.ElementTree import Element, parse as etree_parse
+from xml.etree.ElementTree import Element, fromstring, parse as etree_parse
 
 try:
     import lxml.etree as lxml_etree
@@ -21,13 +21,15 @@ except ImportError:
 
 from elementpath.etree import etree_tostring
 
-from xmlschema import XMLSchema, XMLSchemaValidationError, fetch_namespaces
+from xmlschema import XMLResource, XMLSchema, XMLSchemaValidationError, \
+    XMLSchemaEncodeError, fetch_namespaces
 from xmlschema.dataobjects import DataElement
+from xmlschema.exceptions import XMLResourceExceeded
 from xmlschema.testing import etree_elements_assert_equal, run_xmlschema_tests
 
 from xmlschema.converters import XMLSchemaConverter, UnorderedConverter, \
     ParkerConverter, BadgerFishConverter, AbderaConverter, JsonMLConverter, \
-    ColumnarConverter, GDataConverter
+    ColumnarConverter, GDataConverter, OpaqueElement
 from xmlschema.dataobjects import DataElementConverter
 
 
@@ -693,6 +695,187 @@ class TestConverters(unittest.TestCase):
 
             text = etree_tostring(root, namespaces={'tst': 'http://xmlschema.test/ns'})
             self.assertEqual(len(text.split('bar')), 2)
+
+
+class TestOpaqueWildcard(unittest.TestCase):
+    """Tests for opaque snapshots of unrecognized wildcard content."""
+
+    schema_xsd = """<xs:schema xmlns:xs="http://www.w3.org/2001/XMLSchema">
+      <xs:element name="root">
+        <xs:complexType>
+          <xs:sequence>
+            <xs:element name="id" type="xs:string"/>
+            <xs:any namespace="##other" processContents="lax" minOccurs="0"/>
+            <xs:element name="known" type="xs:string"/>
+            <xs:any namespace="##other" processContents="lax"
+                      minOccurs="0" maxOccurs="unbounded"/>
+          </xs:sequence>
+        </xs:complexType>
+      </xs:element>
+    </xs:schema>"""
+
+    short_xml = """<root xmlns:a="urn:example:a" xmlns:b="urn:example:b">
+      <id>42</id>
+      <a:ext a:attr="A">left<a:child>ca</a:child>right</a:ext>
+      <known>middle</known>
+      <b:ext b:attr="B">text<b:child>cb</b:child></b:ext>
+    </root>"""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.schema = XMLSchema(cls.schema_xsd)
+
+    def test_opaque_snapshot_structure(self):
+        data = self.schema.decode(self.short_xml, opaque_wildcard=True)
+
+        # Known elements keep their typed treatment
+        self.assertEqual(data['id'], '42')
+        self.assertEqual(data['known'], 'middle')
+
+        first = data['a:ext']
+        second = data['b:ext'][0]
+        self.assertIsInstance(first, OpaqueElement)
+        self.assertIsInstance(second, OpaqueElement)
+
+        # Expanded names and attributes
+        self.assertEqual(first.tag, '{urn:example:a}ext')
+        self.assertEqual(first.attrib, {'{urn:example:a}attr': 'A'})
+        self.assertEqual(second.tag, '{urn:example:b}ext')
+        self.assertEqual(second.attrib, {'{urn:example:b}attr': 'B'})
+
+        # Same local name in different namespaces stays distinct
+        self.assertNotEqual(first.tag, second.tag)
+        self.assertEqual(first.tag.split('}')[1], second.tag.split('}')[1])
+
+        # Mixed text and child order are retained
+        self.assertEqual(first.text, 'left')
+        self.assertEqual(len(first.children), 2)
+        self.assertIsInstance(first.children[0], OpaqueElement)
+        self.assertEqual(first.children[0].tag, '{urn:example:a}child')
+        self.assertEqual(first.children[0].text, 'ca')
+        self.assertEqual(first.children[1], (1, 'right'))
+        self.assertEqual(second.text, 'text')
+        self.assertEqual(second.children[0].tag, '{urn:example:b}child')
+
+    def test_roundtrip_structure_and_known_values(self):
+        source_root = fromstring(self.short_xml)
+        data = self.schema.decode(self.short_xml, opaque_wildcard=True)
+        root = self.schema.encode(data, opaque_wildcard=True)
+
+        tags = [child.tag for child in root]
+        self.assertEqual(tags, [
+            'id', '{urn:example:a}ext', 'known', '{urn:example:b}ext'
+        ])
+        self.assertEqual(root.find('id').text, '42')
+        self.assertEqual(root.find('known').text, 'middle')
+
+        first_ext = root.find('{urn:example:a}ext')
+        second_ext = root.find('{urn:example:b}ext')
+        self.assertEqual(first_ext.attrib, {'{urn:example:a}attr': 'A'})
+        self.assertEqual(second_ext.attrib, {'{urn:example:b}attr': 'B'})
+        self.assertEqual(first_ext.text, 'left')
+        self.assertEqual(first_ext.find('{urn:example:a}child').text, 'ca')
+        self.assertEqual(second_ext.find('{urn:example:b}child').text, 'cb')
+
+        # The encoded tree carries the needed namespace declarations
+        serialized = etree_tostring(root)
+        self.assertIn('xmlns:', serialized)
+        self.assertIn('urn:example:a', serialized)
+        self.assertIn('urn:example:b', serialized)
+
+        etree_elements_assert_equal(source_root, root, strict=False)
+
+    def test_skip_wildcard_is_kept_only_with_flag(self):
+        xsd = self.schema_xsd.replace('processContents="lax"',
+                                      'processContents="skip"')
+        schema = XMLSchema(xsd)
+
+        without_flag = schema.decode(self.short_xml)
+        self.assertNotIn('a:ext', without_flag)
+        self.assertNotIn('b:ext', without_flag)
+
+        with_flag = schema.decode(self.short_xml, opaque_wildcard=True)
+        self.assertIsInstance(with_flag['a:ext'], OpaqueElement)
+        self.assertIsInstance(with_flag['b:ext'][0], OpaqueElement)
+
+        root = schema.encode(with_flag, opaque_wildcard=True)
+        self.assertEqual(len(root), 4)
+        self.assertEqual(root[1].tag, '{urn:example:a}ext')
+        self.assertEqual(root[3].tag, '{urn:example:b}ext')
+
+    def test_strict_wildcard_rejects_unknown_content(self):
+        xsd = self.schema_xsd.replace('processContents="lax"',
+                                      'processContents="strict"')
+        schema = XMLSchema(xsd)
+
+        with self.assertRaises(XMLSchemaValidationError):
+            schema.decode(self.short_xml, opaque_wildcard=True)
+
+        # Lax validation collects the error and never wraps the subtree
+        data, errors = schema.decode(
+            self.short_xml, validation='lax', opaque_wildcard=True
+        )
+        self.assertTrue(errors)
+        self.assertNotIn('a:ext', data)
+
+        # Encoding opaque data through a strict wildcard is still rejected
+        lax_data = self.schema.decode(self.short_xml, opaque_wildcard=True)
+        with self.assertRaises(XMLSchemaValidationError):
+            schema.encode(lax_data, opaque_wildcard=True)
+
+    def test_opaque_wildcard_limit_on_decode(self):
+        # 4 opaque element nodes in the document (ext, child, ext, child)
+        with self.assertRaises(XMLResourceExceeded):
+            self.schema.decode(self.short_xml, opaque_wildcard=True,
+                               opaque_wildcard_limit=3)
+
+        data = self.schema.decode(self.short_xml, opaque_wildcard=True,
+                                  opaque_wildcard_limit=4)
+        self.assertIsInstance(data['a:ext'], OpaqueElement)
+
+    def test_opaque_wildcard_limit_on_encode(self):
+        data = self.schema.decode(self.short_xml, opaque_wildcard=True,
+                                  opaque_wildcard_limit=4)
+        with self.assertRaises(XMLResourceExceeded):
+            self.schema.encode(data, opaque_wildcard=True,
+                               opaque_wildcard_limit=3)
+
+    def test_unencodable_opaque_data_is_reported(self):
+        data = self.schema.decode(self.short_xml, opaque_wildcard=True)
+        data['a:ext'].tag = None
+
+        with self.assertRaises(XMLSchemaEncodeError):
+            self.schema.encode(data, opaque_wildcard=True)
+
+        _result, errors = self.schema.encode(
+            data, validation='lax', opaque_wildcard=True
+        )
+        self.assertTrue(errors)
+        self.assertIsInstance(errors[0], XMLSchemaEncodeError)
+
+    def test_snapshot_does_not_depend_on_source_tree(self):
+        resource = XMLResource(self.short_xml, lazy=2)
+        data = self.schema.decode(resource, opaque_wildcard=True)
+        snapshot = data['a:ext']
+
+        # Consume the lazy resource: parsed subtrees get cleared afterwards
+        for _ in resource.iter_depth(mode=2):
+            pass
+
+        self.assertEqual(snapshot.tag, '{urn:example:a}ext')
+        self.assertEqual(snapshot.attrib, {'{urn:example:a}attr': 'A'})
+        self.assertEqual(snapshot.children[0].text, 'ca')
+
+        root = self.schema.encode(data, opaque_wildcard=True)
+        self.assertEqual(root.find('{urn:example:a}ext').text, 'left')
+
+        # Mutating the origin tree must not alter the snapshot
+        non_lazy = XMLResource(self.short_xml)
+        other = self.schema.decode(non_lazy, opaque_wildcard=True)
+        non_lazy.root[1].attrib.clear()
+        non_lazy.root[1][0].text = 'MUTATED'
+        self.assertEqual(other['a:ext'].attrib, {'{urn:example:a}attr': 'A'})
+        self.assertEqual(other['a:ext'].children[0].text, 'ca')
 
 
 if __name__ == '__main__':

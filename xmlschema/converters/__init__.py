@@ -15,7 +15,7 @@ from xmlschema.translation import gettext as _
 from xmlschema.arguments import Option
 from xmlschema.utils.misc import is_subclass
 
-from .base import ElementData, XMLSchemaConverter
+from .base import ElementData, OpaqueElement, XMLSchemaConverter
 from .unordered import UnorderedConverter
 from .parker import ParkerConverter
 from .badgerfish import BadgerFishConverter
@@ -26,7 +26,7 @@ from .columnar import ColumnarConverter
 
 __all__ = ['XMLSchemaConverter', 'UnorderedConverter', 'ParkerConverter',
            'BadgerFishConverter', 'AbderaConverter', 'JsonMLConverter',
-           'ColumnarConverter', 'ElementData', 'GDataConverter',
+           'ColumnarConverter', 'ElementData', 'OpaqueElement', 'GDataConverter',
            'ConverterType', 'ConverterOption']
 
 

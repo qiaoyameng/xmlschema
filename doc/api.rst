@@ -177,6 +177,8 @@ to JSON data <http://wiki.open311.org/JSON_and_XML_Conversion/>`_.
 
 .. autoclass:: xmlschema.ElementData
 
+.. autoclass:: xmlschema.OpaqueElement
+
 .. autoclass:: xmlschema.XMLSchemaConverter
 
     .. autoattribute:: lossy

@@ -14,16 +14,17 @@ from typing import Any, Optional, Union
 from elementpath import SchemaElementNode, build_schema_node_tree
 
 import xmlschema.names as nm
-from xmlschema.exceptions import XMLSchemaValueError
+from xmlschema.exceptions import XMLSchemaValueError, XMLResourceExceeded
 from xmlschema.aliases import ElementType, SchemaType, SchemaElementType, SchemaAttributeType, \
     ModelGroupType, ModelParticleType, AtomicValueType, DecodedValueType, OccursCounterType
+from xmlschema.converters import OpaqueElement, XMLSchemaConverter
 from xmlschema.translation import gettext as _
 from xmlschema.utils.qnames import get_namespace
 from xmlschema.utils.decoding import EmptyType, Empty, raw_encode_value
 from xmlschema.xpath import XMLSchemaProxy, ElementPathMixin
 from xmlschema.caching import schema_cache
 
-from .validation import ValidationContext, EncodeContext, ValidationMixin
+from .validation import ValidationContext, DecodeContext, EncodeContext, ValidationMixin
 from .xsdbase import XsdComponent
 
 from .particles import ParticleMixin
@@ -503,7 +504,8 @@ class XsdAnyElement(XsdWildcard, ParticleMixin,
             context.validation_error(validation, self, reason, obj)
 
         if self.process_contents == 'skip' and not context.process_skipped:
-            return Empty
+            return self._opaque_decode(obj, context) if self._opaque_enabled(context) \
+                else Empty
 
         namespace = get_namespace(obj.tag)
         if not self.maps.loader.load_namespace(namespace):
@@ -529,12 +531,78 @@ class XsdAnyElement(XsdWildcard, ParticleMixin,
             return xsd_element.raw_decode(obj, validation, context)
 
         if validation != 'skip' and self.process_contents == 'strict':
+            # Strict wildcards keep rejecting unknown content: the opaque
+            # representation must never mask this validation failure.
             context.validation_error(validation, self, reason, obj)
+            if self._opaque_enabled(context):
+                return Empty
+
+        if self._opaque_enabled(context):
+            return self._opaque_decode(obj, context)
 
         xsd_element = self.builders.create_element(
             obj.tag, self.maps.validator, parent=self, form='unqualified'
         )
         return xsd_element.raw_decode(obj, validation, context)
+
+    @staticmethod
+    def _opaque_enabled(context: ValidationContext) -> bool:
+        if not isinstance(context, DecodeContext):
+            return False
+        converter = context.converter
+        if not getattr(converter, 'opaque_wildcard', False):
+            return False
+        # Only converters that decode content with the default implementation
+        # can host opaque snapshots in their decoded data structures.
+        return type(converter).element_decode is XMLSchemaConverter.element_decode
+
+    def _opaque_decode(self, obj: ElementType,
+                       context: ValidationContext) -> 'OpaqueElement':
+        """
+        Takes an independent snapshot of a subtree that the schema can't map to
+        a typed element. Only lax/skip wildcards can reach this path, so schema
+        validation errors are not wrapped into opaque data to bypass checks.
+        Snapshot errors are always raised: a truncated or oversized subtree
+        can't be safely encoded back.
+        """
+        counter = getattr(context, 'opaque_counter', None)
+        return context.converter.opaque_snapshot(obj, counter=counter)
+
+    def _opaque_encode(self, name: str, value: OpaqueElement, validation: str,
+                       context: EncodeContext) -> Optional[ElementType]:
+        """Encodes an opaque wildcard snapshot back to an Element."""
+        if self.process_contents == 'strict':
+            reason = _("strict wildcard can't encode opaque content {!r}").format(name)
+            context.validation_error(validation, self, reason, value)
+            return None
+
+        expected_name = name if name[0] == '{' \
+            else context.converter.unmap_qname(name)
+        if expected_name[0] != '{':
+            # The converter has no prefix map for this name (eg. XSD 1.1
+            # wildcard paths): trust the expanded name of the snapshot if
+            # the wildcard admits its namespace.
+            if self.is_matching(value.tag):
+                expected_name = value.tag
+        if value.tag != expected_name:
+            reason = _("opaque data name {!r} doesn't match {!r}").format(
+                value.tag, expected_name)
+            context.encode_error(validation, self, value, self, reason)
+            return None
+
+        limit = getattr(context.converter, 'opaque_wildcard_limit', None)
+        if limit is not None:
+            context.opaque_counter[0] += value.count_elements()
+            if context.opaque_counter[0] > limit:
+                msg = "opaque wildcard limit ({}) exceeded for element {!r}"
+                raise XMLResourceExceeded(msg.format(limit, name))
+
+        try:
+            return value.to_etree(context.etree_element_class)
+        except (TypeError, ValueError, KeyError, AttributeError) as err:
+            reason = _("can't encode opaque data {!r}: {}").format(name, err)
+            context.encode_error(validation, self, value, self, reason)
+            return None
 
     def raw_encode(self, obj: tuple[str, ElementType], validation: str,
                    context: EncodeContext) -> Any:
@@ -544,6 +612,11 @@ class XsdAnyElement(XsdWildcard, ParticleMixin,
         if not self.is_namespace_allowed(namespace):
             reason = _("element {!r} is not allowed here").format(name)
             context.validation_error(validation, self, reason, value)
+            if validation == 'strict':
+                return None
+
+        if isinstance(value, OpaqueElement):
+            return self._opaque_encode(name, value, validation, context)
 
         if self.process_contents == 'skip' and not context.process_skipped:
             return Empty

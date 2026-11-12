@@ -2,6 +2,12 @@
 CHANGELOG
 *********
 
+`Unreleased`_
+=============
+* Add *opaque_wildcard* option to the default converter for retaining unrecognized
+  subtrees matched by *lax* or *skip* wildcards as `OpaqueElement` snapshots, with
+  reversible encoding and an *opaque_wildcard_limit* safety budget
+
 `v4.3.2`_ (2026-06-30)
 ======================
 * Fix for issues #473, #474 and #475

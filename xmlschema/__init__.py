@@ -13,7 +13,7 @@ from .exceptions import XMLSchemaException, XMLResourceError, XMLSchemaNamespace
 from .resources import fetch_resource, fetch_namespaces, fetch_schema_locations, \
     fetch_schema, XMLResource
 from .xpath import ElementPathMixin, ElementSelector, ElementPathSelector
-from .converters import ElementData, XMLSchemaConverter, \
+from .converters import ElementData, OpaqueElement, XMLSchemaConverter, \
     UnorderedConverter, ParkerConverter, BadgerFishConverter, \
     AbderaConverter, JsonMLConverter, ColumnarConverter, GDataConverter
 from .dataobjects import DataElement, DataElementConverter, DataBindingConverter
@@ -45,7 +45,8 @@ __all__ = [
     'XMLSchemaNamespaceError', 'etree_tostring', 'normalize_url',
     'normalize_locations', 'fetch_resource', 'fetch_namespaces',
     'fetch_schema_locations', 'fetch_schema',
-    'XMLResource', 'ElementPathMixin', 'ElementData', 'XMLSchemaConverter',
+    'XMLResource', 'ElementPathMixin', 'ElementData', 'OpaqueElement',
+    'XMLSchemaConverter',
     'UnorderedConverter', 'ParkerConverter', 'BadgerFishConverter', 'GDataConverter',
     'AbderaConverter', 'JsonMLConverter', 'ColumnarConverter', 'DataElement',
     'DataElementConverter', 'DataBindingConverter', 'validate', 'is_valid',

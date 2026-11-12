@@ -21,7 +21,7 @@ import xmlschema.names as nm
 from xmlschema.exceptions import XMLSchemaValueError
 from xmlschema.aliases import ElementType, NsmapType, SchemaType, ModelParticleType, \
     SchemaElementType, ComponentClassType, OccursCounterType
-from xmlschema.converters import ElementData
+from xmlschema.converters import ElementData, OpaqueElement
 from xmlschema.translation import gettext as _
 from xmlschema.utils.decoding import Empty, raw_encode_value, raw_encode_attributes
 from xmlschema.utils.qnames import get_qname, local_name
@@ -1175,7 +1175,9 @@ class XsdGroup(XsdComponent, MutableSequence[ModelParticleType],
                     context.validation_error(validation, self, reason, value)
                     continue
 
-            if xsd_element.skip and not context.process_skipped:
+            if xsd_element.skip and not context.process_skipped and \
+                    not (isinstance(value, tuple) and
+                         isinstance(value[1], OpaqueElement)):
                 continue
             if over_max_depth:
                 continue

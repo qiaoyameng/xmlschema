@@ -1453,6 +1453,8 @@ class XMLSchemaBase(XsdValidator, ElementPathMixin[Union[SchemaType, XsdElement]
                     keep_empty: bool = False,
                     keep_unknown: bool = False,
                     process_skipped: bool = False,
+                    opaque_wildcard: bool = False,
+                    opaque_wildcard_limit: Optional[int] = None,
                     max_depth: Optional[int] = None,
                     depth_filler: Optional[DepthFillerType] = None,
                     extra_validator: Optional[ExtraValidatorType] = None,
@@ -1506,6 +1508,14 @@ class XMLSchemaBase(XsdValidator, ElementPathMixin[Union[SchemaType, XsdElement]
         *xs:anyType*. For default unknown tags not decoded by a wildcard are discarded.
         :param process_skipped: process XML data that match a wildcard with \
         `processContents='skip'`.
+        :param opaque_wildcard: if set to `True` element subtrees matching a \
+        wildcard with *lax* or *skip* processing that can't be resolved to a \
+        typed element are kept as :class:`~xmlschema.converters.OpaqueElement` \
+        snapshots instead of being discarded. Strict wildcards keep rejecting \
+        unknown content.
+        :param opaque_wildcard_limit: maximum number of opaque element nodes \
+        retained in a decoded document. If `None` only the package safety limits \
+        apply. Exceeding the limit raises an :class:`~xmlschema.exceptions.XMLResourceExceeded`.
         :param max_depth: maximum level of decoding, for default there is no limit. \
         With lazy resources is set to `source.lazy_depth` for managing lazy decoding.
         :param depth_filler: an optional callback function to replace data over the \
@@ -1553,6 +1563,8 @@ class XMLSchemaBase(XsdValidator, ElementPathMixin[Union[SchemaType, XsdElement]
             keep_empty=keep_empty,
             keep_unknown=keep_unknown,
             process_skipped=process_skipped,
+            opaque_wildcard=opaque_wildcard,
+            opaque_wildcard_limit=opaque_wildcard_limit,
             max_depth=max_depth,
             depth_filler=depth_filler,
             extra_validator=extra_validator,
@@ -1665,6 +1677,8 @@ class XMLSchemaBase(XsdValidator, ElementPathMixin[Union[SchemaType, XsdElement]
                     converter: Optional[ConverterType] = None,
                     unordered: bool = False,
                     process_skipped: bool = False,
+                    opaque_wildcard: bool = False,
+                    opaque_wildcard_limit: Optional[int] = None,
                     max_depth: Optional[int] = None,
                     untyped_data: bool = False,
                     etree_element_class: Optional[type[ElementType]] = None,
@@ -1686,6 +1700,11 @@ class XMLSchemaBase(XsdValidator, ElementPathMixin[Union[SchemaType, XsdElement]
         iteration of the child elements.
         :param process_skipped: process XML decoded data that match a wildcard with \
         `processContents='skip'`.
+        :param opaque_wildcard: if set to `True` opaque subtree snapshots that \
+        were kept by the decoder are encoded back. Strict wildcards keep rejecting \
+        opaque data.
+        :param opaque_wildcard_limit: maximum number of opaque element nodes \
+        that can be encoded. If `None` only the package safety limits apply.
         :param max_depth: maximum level of encoding, for default there is no limit.
         :param untyped_data: for default xs:untypedAtomic datatype is not accepted as \
         a decoded value, set to true to extend the compatibility of with string and \
@@ -1709,6 +1728,8 @@ class XMLSchemaBase(XsdValidator, ElementPathMixin[Union[SchemaType, XsdElement]
             converter=converter,
             unordered=unordered,
             process_skipped=process_skipped,
+            opaque_wildcard=opaque_wildcard,
+            opaque_wildcard_limit=opaque_wildcard_limit,
             max_depth=max_depth,
             untyped_data=untyped_data,
             etree_element_class=etree_element_class,
