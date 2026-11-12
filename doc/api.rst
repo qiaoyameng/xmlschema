@@ -49,6 +49,10 @@ Document level API
 .. autofunction:: xmlschema.to_json
 .. autofunction:: xmlschema.to_etree
 .. autofunction:: xmlschema.from_json
+.. autofunction:: xmlschema.encode_records
+
+.. autoclass:: xmlschema.RecordStreamResult
+.. autoexception:: xmlschema.XMLSchemaStreamError
 
 
 .. _schema-level-api:

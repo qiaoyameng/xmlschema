@@ -2,6 +2,14 @@
 CHANGELOG
 *********
 
+Unreleased
+==========
+* Add streaming record encoding to binary sinks (`XMLSchemaBase.encode_records`
+  and `xmlschema.streaming.encode_records`), supporting schemas whose root
+  content model has a single repeatable record particle
+* Add `RecordStreamResult` and `XMLSchemaStreamError` for reporting the written
+  byte range, completion status and failure reason of a streaming encoding
+
 `v4.3.2`_ (2026-06-30)
 ======================
 * Fix for issues #473, #474 and #475

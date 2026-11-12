@@ -339,6 +339,36 @@ All the decoding and encoding methods are based on two generator methods of the 
 namely *iter_decode()* and *iter_encode()*, that yield both data and validation errors.
 See :ref:`schema-level-api` section for more information.
 
+Records can also be encoded incrementally to a binary sink, without building the
+whole ElementTree in memory. The schema must have a root content model made of a
+single repeatable element particle::
+
+    import io
+    from xmlschema import XMLSchema
+
+    schema = XMLSchema('records.xsd')
+
+    def records():           # e.g. rows fetched one by one from a database
+        for row in fetch_rows():
+            yield row
+
+    with open('records.xml', 'wb') as sink:
+        result = schema.encode_records(records(), sink)
+
+    if not result.completed:
+        # The sink only contains a valid XML prefix: no closing tag is appended
+        print('failed after %d bytes: %s' % (result.bytes_written, result.reason))
+    else:
+        print('written', result.bytes_written, 'bytes,', result.records_written, 'records')
+
+Each record goes through the standard encoding pipeline (type conversion, namespaces,
+default values and content model validation), while cross-record identity constraints
+are checked when the source is exhausted. On short writes, source exceptions or
+validation failures the process enters a non-continuable state and reports the written
+byte range; the caller-owned sink is never closed. Provide ``raise_on_error=True`` to
+raise an :class:`~xmlschema.XMLSchemaStreamError` instead of returning the failed
+:class:`~xmlschema.RecordStreamResult`.
+
 
 Decoding a part using XPath
 ---------------------------

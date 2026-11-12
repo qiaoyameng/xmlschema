@@ -18,11 +18,11 @@ from abc import ABCMeta
 import logging
 import re
 import sys
-from collections.abc import Callable, Iterator
+from collections.abc import Callable, Iterable, Iterator
 from functools import cached_property
 from operator import attrgetter
 from pathlib import Path
-from typing import Any, cast, Optional, Union
+from typing import Any, BinaryIO, cast, Optional, Union
 from urllib.request import OpenerDirector
 from xml.etree import ElementTree
 from xml.etree.ElementTree import Element
@@ -1792,6 +1792,23 @@ class XMLSchemaBase(XsdValidator, ElementPathMixin[Union[SchemaType, XsdElement]
             return (data, errors) if validation == 'lax' else data
 
     to_etree = encode
+
+    def encode_records(self, records: Iterable[Any], sink: BinaryIO,
+                       path: Optional[str] = None, **kwargs: Any) \
+            -> 'RecordStreamResult':
+        """
+        Streaming encoding of a sequence of records to a binary sink.
+
+        The root element content model must consist of a single repeatable
+        element particle. Each record is encoded and written incrementally
+        without building the full XML tree, reusing the standard encoding
+        pipeline; cross-record identity constraints are checked at the end.
+        See :func:`xmlschema.streaming.encode_records` for the full contract.
+        """
+        from xmlschema.streaming import encode_records
+        return encode_records(self, records, sink, path=path, **kwargs)
+
+    write_records = encode_records
 
 
 class XMLSchema10(XMLSchemaBase):
