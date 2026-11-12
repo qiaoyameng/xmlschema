@@ -297,6 +297,27 @@ Classes for converting namespace representation or for accessing namespace objec
 .. autoclass:: xmlschema.namespaces.NamespaceMapper
 .. autoclass:: xmlschema.namespaces.NamespaceView
 
+Schema-aware prefix rewriting
+-----------------------------
+
+Renames the namespace prefixes of an XML document using its XSD schema, so
+that not only element/attribute tags but also QName-typed values
+(``xsi:type``, element text, attributes, list items and union members) are
+rewritten consistently. The original document is never modified and the
+element order, mixed text and expanded names are preserved. Content whose
+type cannot be proved from the schema is either rejected or kept verbatim,
+never guessed.
+
+.. autoclass:: xmlschema.NamespacePrefixRewriter
+    :members:
+
+.. autoclass:: xmlschema.PrefixRewriteError
+
+.. autofunction:: xmlschema.rewrite_namespace_prefixes
+.. autofunction:: xmlschema.rewrite_prefixes
+
+.. automethod:: xmlschema.XMLSchema.rewrite_prefixes
+
 
 .. _settings-api:
 

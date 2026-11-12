@@ -18,7 +18,7 @@ from abc import ABCMeta
 import logging
 import re
 import sys
-from collections.abc import Callable, Iterator
+from collections.abc import Callable, Iterator, Mapping
 from functools import cached_property
 from operator import attrgetter
 from pathlib import Path
@@ -1611,6 +1611,22 @@ class XMLSchemaBase(XsdValidator, ElementPathMixin[Union[SchemaType, XsdElement]
 
         if context.max_depth is not None:
             yield from self._validate_references(validation, context)
+
+    def rewrite_prefixes(self, source: Union[XMLSourceType, XMLResource],
+                         prefix_map: Optional[Mapping[str, str]] = None,
+                         *, unknown_policy: str = 'reject',
+                         verify: bool = True) -> Any:
+        """
+        Rewrites the namespace prefixes of an XML document in a schema-aware
+        way, including the prefixes used by QName-typed values. Returns a new
+        Element tree; the source document is never modified. See
+        :func:`xmlschema.prefix_rewriter.rewrite_namespace_prefixes`.
+        """
+        from xmlschema.prefix_rewriter import rewrite_namespace_prefixes
+        return rewrite_namespace_prefixes(
+            source, self, prefix_map,
+            unknown_policy=unknown_policy, verify=verify,
+        )
 
     def decode(self, source: Union[XMLSourceType, XMLResource],
                path: Optional[str] = None,

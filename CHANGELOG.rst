@@ -2,6 +2,13 @@
 CHANGELOG
 *********
 
+Unreleased
+==========
+* Add schema-aware namespace prefix rewriting (`rewrite_namespace_prefixes()`,
+  `XMLSchema.rewrite_prefixes()` and `NamespacePrefixRewriter`): rewrites tags
+  and QName-typed values (including `xsi:type`, lists and union members) while
+  preserving expanded names, element order, mixed text and the source document
+
 `v4.3.2`_ (2026-06-30)
 ======================
 * Fix for issues #473, #474 and #475

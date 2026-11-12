@@ -110,6 +110,49 @@ For decoding the default is set to *'stacked'* or *'collapsed'*, for encoding th
 default can be also *'none'* if no namespace declaration can be retrieved from XML
 data (e.g. :class:`xmlschema.ParkerConverter`).
 
+Schema-aware prefix rewriting
+=============================
+
+When an XML document has to be exchanged with another party that requires
+its own namespace prefixes, changing only the element/attribute tags is not
+enough: prefixes also occur inside *xs:QName* typed values, for example in
+``xsi:type`` attributes, element text, ordinary attributes and in the items
+or members of list and union types. The function
+:func:`xmlschema.rewrite_namespace_prefixes` and the class
+:class:`xmlschema.NamespacePrefixRewriter` use the XSD schema to locate every
+place where a prefix is semantically a QName.
+
+Only values that the schema proves to be QNames are rewritten; a plain string
+that happens to contain a colon, but is validated against a non-QName member
+of a union (or against ``xs:string``), is left untouched. Default namespaces,
+local prefix shadowing and conflicting prefixes are handled with a stable
+allocation order. Element order, mixed text and expanded names are preserved,
+and the source document is never modified: a new document is returned.
+
+Content that the schema cannot give a type to (``xs:any``/``xs:anyAttribute``
+with *processContents='skip'*, or unbound elements/attributes) is not guessed.
+With ``unknown_policy='reject'`` (the default) the rewriting raises a
+:class:`xmlschema.PrefixRewriteError`; with ``unknown_policy='preserve'`` the
+unproven subtree or value is copied verbatim, with enough namespace
+declarations to keep its own prefixes resolvable.
+
+By default the source and the rewritten documents are decoded with the same
+schema and compared semantically (QNames normalized to their expanded names),
+and the serialized output is checked to declare every prefix used by a QName
+value::
+
+    from xmlschema import rewrite_namespace_prefixes
+
+    new_root = rewrite_namespace_prefixes(
+        'source.xml', schema,
+        prefix_map={'http://example.com/ns': 'ex'},
+        unknown_policy='preserve',
+    )
+
+The equivalent method :meth:`xmlschema.XMLSchema.rewrite_prefixes` is available
+on schema instances, and :meth:`xmlschema.NamespacePrefixRewriter.serialize`
+returns the rewritten document as a string or bytes.
+
 Lazy validation
 ===============
 

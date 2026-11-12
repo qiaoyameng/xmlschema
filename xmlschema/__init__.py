@@ -22,6 +22,8 @@ from .documents import validate, is_valid, iter_errors, iter_decode, \
 from .exports import download_schemas
 from .loaders import SchemaLoader, LocationSchemaLoader, SafeSchemaLoader
 from .utils.etree import etree_tostring
+from .prefix_rewriter import NamespacePrefixRewriter, PrefixRewriteError, \
+    rewrite_namespace_prefixes, rewrite_prefixes
 from .utils.urls import normalize_url, normalize_locations
 
 from .validators import (
@@ -43,6 +45,8 @@ __status__ = "Production/Stable"
 __all__ = [
     'limits', 'translation', 'XMLSchemaException', 'XMLResourceError',
     'XMLSchemaNamespaceError', 'etree_tostring', 'normalize_url',
+    'NamespacePrefixRewriter', 'PrefixRewriteError',
+    'rewrite_namespace_prefixes', 'rewrite_prefixes',
     'normalize_locations', 'fetch_resource', 'fetch_namespaces',
     'fetch_schema_locations', 'fetch_schema',
     'XMLResource', 'ElementPathMixin', 'ElementData', 'XMLSchemaConverter',
