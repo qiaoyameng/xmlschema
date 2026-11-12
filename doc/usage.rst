@@ -754,6 +754,47 @@ This class can be used to derive specialized schema-related classes.
 See :ref:`wsdl11-documents` section for an application example.
 
 
+Incremental schema workspaces
+=============================
+
+When a project maintains a set of related XSD files, a change to a single shared
+type forces a full rebuild of every schema that uses it. The class
+:class:`xmlschema.SchemaWorkspace` avoids this cost by tracking a summary for
+each resource (its normalized base URL, its effective target namespace and a
+digest of its content) together with the *import*/*include*/*redefine*
+dependency graph between the resources.
+
+On every refresh the workspace rebuilds only the resources whose summary
+changed and the resources that depend on them; the other branches keep their
+already built components. The resource identity is the pair *base URL* +
+*effective namespace*, so a chameleon schema (a schema without
+``targetNamespace``) included from two different contexts produces two
+independent resources whose components are never mixed up.
+
+.. code-block:: python
+
+    import xmlschema
+
+    workspace = xmlschema.SchemaWorkspace()
+    snapshot = workspace.publish('/path/to/app.xsd')
+
+    # Later, apply a change to one document of the graph:
+    snapshot = workspace.apply({'common.xsd': new_content})
+
+    # Old readers keep using the previous complete snapshot:
+    snapshot.schema.is_valid(xml_data)
+    snapshot.stats.loads                     # documents actually reloaded
+    snapshot.stats.global_components_built   # components actually rebuilt
+    snapshot.stats.resources_reused          # identities reused unchanged
+
+A refresh is transactional: the candidate version is fully built and checked
+before it replaces the published snapshot. If the candidate fails (a parse
+error, a missing resource, a dependency cycle) the previous snapshot stays
+published and the workspace keeps serving the old version. Missing resources
+and dependency cycles are reported with the complete chain of the resources
+involved, and no network access is ever attempted to complete the graph.
+
+
 Meta-schemas and XSD sources
 ============================
 

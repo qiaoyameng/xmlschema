@@ -2,6 +2,14 @@
 CHANGELOG
 *********
 
+Unreleased
+==========
+* Add `xmlschema.SchemaWorkspace` for incremental rebuilding of related local
+  XSD resources: per-resource summaries (base URL + effective namespace + digest),
+  import/include/redefine dependency graph, atomic snapshot publication,
+  chameleon context isolation, and traceable missing-resource/cycle chains
+  without network access.
+
 `v4.3.2`_ (2026-06-30)
 ======================
 * Fix for issues #473, #474 and #475

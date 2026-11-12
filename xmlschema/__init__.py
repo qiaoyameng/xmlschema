@@ -23,6 +23,10 @@ from .exports import download_schemas
 from .loaders import SchemaLoader, LocationSchemaLoader, SafeSchemaLoader
 from .utils.etree import etree_tostring
 from .utils.urls import normalize_url, normalize_locations
+from .workspace import (
+    SchemaWorkspace, SchemaSnapshot, BuildStats, ResourceSummary, DependencyEdge,
+    SchemaWorkspaceError, MissingResourceError, DependencyCycleError,
+)
 
 from .validators import (
     XMLSchemaValidatorError, XMLSchemaParseError, XMLSchemaNotBuiltError,
@@ -59,4 +63,7 @@ __all__ = [
     'XMLSchemaTypeTableWarning', 'XMLSchemaAssertPathWarning',
     'XsdGlobals', 'XMLSchemaBase', 'XMLSchema', 'XMLSchema10', 'XMLSchema11',
     'XsdComponent', 'XsdType', 'XsdElement', 'XsdAttribute',
+    'SchemaWorkspace', 'SchemaSnapshot', 'BuildStats', 'ResourceSummary',
+    'DependencyEdge', 'SchemaWorkspaceError', 'MissingResourceError',
+    'DependencyCycleError',
 ]

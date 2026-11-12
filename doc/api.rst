@@ -277,6 +277,55 @@ Loaders API
 .. autofunction:: xmlschema.SafeSchemaLoader
 
 
+.. _workspace-api:
+
+Incremental schema workspace
+============================
+
+.. autoclass:: xmlschema.SchemaWorkspace
+
+    .. automethod:: publish
+    .. automethod:: apply
+    .. autoattribute:: snapshot
+    .. automethod:: summaries
+    .. automethod:: dependencies
+    .. automethod:: dependents
+
+.. autoclass:: xmlschema.SchemaSnapshot
+
+    .. autoattribute:: schema
+    .. autoattribute:: maps
+    .. autoattribute:: generation
+    .. autoattribute:: stats
+    .. automethod:: is_valid
+    .. automethod:: validate
+    .. automethod:: iter_errors
+
+.. autoclass:: xmlschema.BuildStats
+
+    .. autoattribute:: loads
+    .. autoattribute:: global_components_built
+    .. autoattribute:: schemas_rebuilt
+    .. autoattribute:: resources_reused
+    .. autoattribute:: namespaces_reused
+    .. automethod:: as_dict
+
+.. autoclass:: xmlschema.ResourceSummary
+
+    .. autoattribute:: url
+    .. autoattribute:: target_namespace
+    .. autoattribute:: digest
+    .. autoattribute:: declared_namespace
+    .. autoattribute:: identity
+    .. autoattribute:: is_chameleon
+
+.. autoclass:: xmlschema.DependencyEdge
+
+.. autoexception:: xmlschema.MissingResourceError
+.. autoexception:: xmlschema.DependencyCycleError
+.. autoexception:: xmlschema.SchemaWorkspaceError
+
+
 .. _translation-api:
 
 Translation API
